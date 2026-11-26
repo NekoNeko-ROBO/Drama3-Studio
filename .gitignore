@@ -69,3 +69,4 @@ node_modules/
 Thumbs.db
 .idea/
 .vscode/
+!/docs/voice-library-development.md
