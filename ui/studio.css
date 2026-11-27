@@ -1876,6 +1876,15 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   background: #fff5ef;
   color: #a43c24;
 }
+.reference-picker-validation {
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid #f0c6b8;
+  background: #fff5f5;
+  color: #a53238;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .reference-picker-entry-list {
   flex: 1 1 auto;
   min-height: 0;

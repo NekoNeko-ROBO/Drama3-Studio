@@ -1205,7 +1205,9 @@ class AppState:
         audio = _inside(folder / metadata["audio"], folder)
         if not audio.is_file():
             raise ValueError("Reference audio is missing")
+        size, duration, readable = self._entry_metadata(audio)
         return {"id": upload_id, "filename": metadata["filename"], "audio_path": str(audio),
+                "bytes": size, "duration": duration, "readable": readable,
                 "audio_url": "/files/" + "/".join(quote(part) for part in audio.relative_to(ROOT).parts)}
 
     def reference_from_version(self, payload):
@@ -2513,7 +2515,14 @@ class AppState:
                 duration = info.frames / info.samplerate
         except Exception:
             pass
-        return size, duration
+        readable = False
+        try:
+            with path.open("rb") as stream:
+                stream.read(1)
+            readable = True
+        except OSError:
+            pass
+        return size, duration, readable
 
     def voice_reference_entries(self, voice_id: str) -> dict:
         folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
@@ -2526,23 +2535,23 @@ class AppState:
                 audio = _inside(folder / item["audio"], folder)
                 if not audio.is_file():
                     continue
-                size, duration = self._entry_metadata(audio)
+                size, duration, readable = self._entry_metadata(audio)
                 entries.append({
                     "kind": "reference", "key": f"reference:{item['audio']}",
                     "filename": item["audio"], "text": str(item.get("transcript") or ""),
                     "audio_url": item.get("audio_url") or self._audio_url(audio),
-                    "bytes": size, "duration": duration,
+                    "bytes": size, "duration": duration, "readable": readable,
                 })
             for item in _read_voice_dataset(folder):
                 audio = _inside(folder / item["audio"], folder)
                 if not audio.is_file():
                     continue
-                size, duration = self._entry_metadata(audio)
+                size, duration, readable = self._entry_metadata(audio)
                 entries.append({
                     "kind": "asset", "key": f"asset:{item['id']}",
                     "filename": item.get("filename") or "clip", "text": item.get("text") or "",
                     "audio_url": self._audio_url(audio),
-                    "bytes": size, "duration": duration,
+                    "bytes": size, "duration": duration, "readable": readable,
                 })
         with self._voice_tags_lock:
             tags = _read_voice_tags(self.data_root)
@@ -2613,7 +2622,9 @@ class AppState:
         metadata = {"filename": Path(filename).name, "audio": audio_name}
         (folder / "reference.json").write_text(
             json.dumps(metadata, ensure_ascii=False) + "\n", encoding="utf-8")
-        return {"id": upload_id, "filename": metadata["filename"]}
+        size, duration, readable = self._entry_metadata(folder / audio_name)
+        return {"id": upload_id, "filename": metadata["filename"],
+                "bytes": size, "duration": duration, "readable": readable}
 
     def start_uploaded_audio_edit(self, payload):
         """Create one edit job; uploaded audio is encoded only when the job runs."""
@@ -2931,8 +2942,21 @@ class AppState:
             references.append(VoiceReference(str(audio), transcript, speaker))
         return references
 
+    @staticmethod
+    def _validate_explicit_reference_text(text, speaker):
+        if isinstance(speaker, bool) or not isinstance(speaker, int) or not 0 <= speaker <= 15:
+            raise ValueError("Invalid reference speaker")
+        if not isinstance(text, str) or not re.sub(
+                r"<\|speaker:\d+\|>", "", text).strip():
+            raise ValueError("Reference transcript is required")
+        markers = {int(value) for value in re.findall(r"<\|speaker:(\d+)\|>", text)}
+        if markers and markers != {speaker}:
+            raise ValueError("Reference transcript speaker does not match the selected speaker")
+
     def _references(self, payload: dict):
         references = []
+        explicit_bytes = 0
+        explicit_request = False
         bindings = payload.get("voice_bindings")
         if bindings is not None:
             if not isinstance(bindings, list) or len(bindings) > 32:
@@ -2942,6 +2966,50 @@ class AppState:
                     raise ValueError("Each voice binding must be an object")
                 if "voice_id" in item:
                     voice = self._voice(item["voice_id"])
+                    if "reference_audio" in item or "asset_id" in item:
+                        explicit_request = True
+                        if "reference_audio" in item and "asset_id" in item:
+                            raise ValueError("Choose one saved reference identity per binding")
+                        speaker = item.get("speaker", 0)
+                        folder = _inside(self.voices_root / _voice_id(item["voice_id"]),
+                                         self.voices_root)
+                        if "asset_id" in item:
+                            asset_id = item.get("asset_id")
+                            if not isinstance(asset_id, str) or not re.fullmatch(
+                                    r"[a-f0-9]{32}", asset_id):
+                                raise ValueError("Invalid saved clip id")
+                            record = next((asset for asset in _read_voice_dataset(folder)
+                                           if asset["id"] == asset_id), None)
+                            if record is None:
+                                raise ValueError("Selected clip is no longer available")
+                            audio = _inside(folder / record["audio"], folder)
+                            if not audio.is_file():
+                                raise ValueError("Selected clip audio is missing")
+                            transcript = str(record.get("text") or "")
+                        else:
+                            audio_name = item.get("reference_audio")
+                            clip = next((reference for reference in voice["references"]
+                                         if reference["audio"] == audio_name), None)
+                            if clip is None:
+                                raise ValueError("Selected reference audio is no longer in this voice")
+                            audio = _inside(folder / clip["audio"], folder)
+                            if not audio.is_file():
+                                raise ValueError("Selected reference audio is missing")
+                            transcript = str(clip.get("transcript") or "")
+                        self._validate_explicit_reference_text(transcript, speaker)
+                        size, duration, readable = self._entry_metadata(audio)
+                        if not readable or size is None:
+                            raise ValueError("Selected reference audio is missing or unreadable")
+                        if size > 128 * 1024**2:
+                            raise ValueError("Each reference clip must be no larger than 128 MiB")
+                        explicit_bytes += size
+                        if explicit_bytes > 256 * 1024**2:
+                            raise ValueError("Selected references exceed the 256 MiB request limit")
+                        if duration is not None and not 0 < duration <= 120:
+                            raise ValueError(
+                                "Each reference clip must be longer than 0 and at most 120 seconds")
+                        references.append(VoiceReference(str(audio), transcript, speaker))
+                        continue
                     if not voice["references"]:
                         raise ValueError("This voice has no reference audio; import or add one first")
                     index = item.get("reference_index")
@@ -2960,6 +3028,22 @@ class AppState:
                     references.extend(self._uploaded_references({"uploaded_references": [item]}))
             if len(references) > 32:
                 raise ValueError("At most 32 reference clips are supported")
+            if explicit_request:
+                total_bytes = 0
+                for reference in references:
+                    self._validate_explicit_reference_text(reference.text, reference.speaker)
+                    audio = _inside(Path(reference.audio), ROOT)
+                    size, duration, readable = self._entry_metadata(audio)
+                    if not readable or size is None:
+                        raise ValueError("A reference audio file is missing or unreadable")
+                    if size > 128 * 1024**2:
+                        raise ValueError("Each reference clip must be no larger than 128 MiB")
+                    total_bytes += size
+                    if total_bytes > 256 * 1024**2:
+                        raise ValueError("Selected references exceed the 256 MiB request limit")
+                    if duration is not None and not 0 < duration <= 120:
+                        raise ValueError(
+                            "Each reference clip must be longer than 0 and at most 120 seconds")
             return references
         identifiers = payload.get("voice_ids", []) or []
         if not isinstance(identifiers, list) or len(identifiers) > 32:

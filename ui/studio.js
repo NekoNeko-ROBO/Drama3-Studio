@@ -43,7 +43,7 @@
     design: fresh('design'), voiceSource: 'reference', designLegacy: null, writing: null, referenceTask: null,
     operation: null, returnDrafts: [], restoring: false, lastVoice: null,
     watch: null, lastSubmit: null, singleForm: null, singleReferences: [], libraryReferences: [],
-    referenceSelection: null,
+    referenceSelection: null, referenceSelectionLegacy: false,
     versionFocus: null, restoredFrom: null, restoredModel: null, designRecipe: null, designHistoryReturn: false,
     contexts: new Map(), contextLoads: new Map(), streamDraft: null, switchingInput: false };
   flow.voiceDraft = { main: ReferencePrep.fresh(), name: '', autoName: null };
@@ -89,7 +89,7 @@
     Object.assign(form, flow.writing.reference);
     const task = flow.referenceTask;
     if (task) Object.assign(form, { 'previous-take': task.previous, 'source-take': task.source });
-    return { context: copy(flow.single), form, mode: task?.mode || $('mode').value,
+    const result = { context: copy(flow.single), form, mode: task?.mode || $('mode').value,
       random: $('random-seed').checked, silenceRetry: $('silence-retry').checked,
       autoplay: $('autoplay-audio').checked, streamLive: $('stream-live').checked,
       streamDraft: copy(flow.streamDraft),
@@ -112,6 +112,8 @@
       original: state.cloneOriginal ? {
         upload: state.cloneOriginal.upload, transcript: state.cloneOriginal.transcript,
       } : null };
+    if (flow.referenceSelectionLegacy) delete result.referenceSelection;
+    return result;
   }
   function sceneSnapshot() {
     return { ...copy(flow.scene), script: $('dialogue-script').value, scriptVersion: 1,
@@ -177,7 +179,9 @@
       flow.singleReferences = value.references || [];
       flow.libraryReferences.forEach(ReferencePrep.cancel);
       flow.libraryReferences = value.libraryReferences || [];
+      const hasReferenceSelection = Object.hasOwn(value || {}, 'referenceSelection');
       flow.referenceSelection = selectionFromDraft(value);
+      flow.referenceSelectionLegacy = !hasReferenceSelection && flow.referenceSelection !== null;
       flow.restoredFrom = value.restoredFrom || null; flow.restoredModel = value.restoredModel || null;
       flow.design = value.design?.context || fresh('design'); flow.designRecipe = value.design?.recipe || null;
       flow.designHistoryReturn = value.design?.historyReturn
@@ -200,7 +204,14 @@
           $('clone-transcript').value = value.transcript || '';
         }
         $('clone-upload-preview').open = !value.referenceCollapsed;
-        flow.referenceSelection = null;
+        if (!hasReferenceSelection) {
+          flow.referenceSelection = null;
+          flow.referenceSelectionLegacy = false;
+        } else if (flow.referenceSelection?.keys?.length) {
+          state.selectedVoiceIds = new Set([flow.referenceSelection.voiceId]);
+          updateVoiceSelection();
+          renderLibraryReferences(true);
+        }
       } else {
         state.selectedVoiceIds = new Set(value.voices || []); updateVoiceSelection();
       }
@@ -414,7 +425,7 @@
     try {
       if (voiceDesignActive()) switchVoiceSource('reference');
       clearCloneAudio(); flow.single = { ...(version.studio || fresh('single')), layout: 'single' };
-      flow.referenceSelection = null;
+      flow.referenceSelection = null; flow.referenceSelectionLegacy = false;
       if (source.part_index !== undefined) flow.single.line_id = version.line_id;
       flow.operation = { action, source, original: version.text, model: recipe.model || null,
         rewordReferences: reword.bindings, legacy: !version.complete_recipe,
@@ -754,7 +765,7 @@
         flow.singleReferences = references.slice(1).map(preparedReference);
       }
       flow.single = { ...(Object.keys(draftStudio).length ? draftStudio : fresh('single')), layout: 'single' }; flow.operation = null;
-      flow.referenceSelection = null;
+      flow.referenceSelection = null; flow.referenceSelectionLegacy = false;
       flow.restoredFrom = source; flow.restoredModel = recipe.model || null;
       $('mode').value = ['audio_stream', 'stream'].includes(recipe.mode) ? 'tts' : recipe.mode || 'tts';
       $('text').value = draftTranscript(version.text);
@@ -1058,6 +1069,119 @@
   function selectionCount(selection) {
     return selection?.keys?.length || 0;
   }
+  const REFERENCE_MAX_COUNT = 32;
+  const REFERENCE_MAX_BYTES = 128 * 1024 ** 2;
+  const REFERENCE_MAX_TOTAL_BYTES = 256 * 1024 ** 2;
+  const REFERENCE_MAX_SECONDS = 120;
+  const referenceEntriesCache = new Map();
+  const referenceEntriesInflight = new Map();
+  const referenceUploadCache = new Map();
+
+  function referenceTranscriptProblem(text, speaker) {
+    const value = String(text || "");
+    if (!value.replace(/<\|speaker:\d+\|>/g, "").trim()) return "empty";
+    const markers = [...value.matchAll(/<\|speaker:(\d+)\|>/g)].map(match => Number(match[1]));
+    if (markers.some(marker => marker !== speaker)) return "speaker";
+    return "";
+  }
+  function validateReferenceRequest(items) {
+    const errors = [];
+    if (items.length > REFERENCE_MAX_COUNT) {
+      errors.push(t('{count} references selected; {over} over the 32-reference limit.',
+        { count: items.length, over: items.length - REFERENCE_MAX_COUNT }));
+    }
+    let totalBytes = 0, allBytes = true, totalDuration = 0, allDuration = true;
+    for (const item of items) {
+      const name = item.label || item.filename || item.key || t('Reference');
+      if (item.error) errors.push(String(item.error));
+      if (item.missing || item.readable === false) {
+        errors.push(t('Reference “{name}” audio is missing or unreadable.', { name }));
+      }
+      if (!Number.isFinite(item.bytes)) {
+        allBytes = false;
+        errors.push(t('Could not read the size of “{name}”.', { name }));
+      } else {
+        totalBytes += item.bytes;
+        if (item.bytes > REFERENCE_MAX_BYTES) {
+          errors.push(t('Reference “{name}” exceeds 128 MiB.', { name }));
+        }
+      }
+      if (Number.isFinite(item.duration)) {
+        totalDuration += item.duration;
+        if (!(item.duration > 0 && item.duration <= REFERENCE_MAX_SECONDS)) {
+          errors.push(t('Reference “{name}” must be longer than 0 and at most 120 seconds.', { name }));
+        }
+      } else {
+        allDuration = false;
+      }
+      const problem = referenceTranscriptProblem(item.text, item.speaker);
+      if (problem === "empty") {
+        errors.push(t('Reference “{name}” needs a saved transcript.', { name }));
+      } else if (problem === "speaker") {
+        errors.push(t('Reference “{name}” speaker markers do not match.', { name }));
+      }
+    }
+    if (allBytes && totalBytes > REFERENCE_MAX_TOTAL_BYTES) {
+      errors.push(t('Total reference size {size} exceeds 256 MiB by {over}.', {
+        size: referenceMetaBytes(totalBytes),
+        over: referenceMetaBytes(totalBytes - REFERENCE_MAX_TOTAL_BYTES),
+      }));
+    }
+    return {
+      ok: errors.length === 0, errors, items,
+      totalBytes: allBytes ? totalBytes : null,
+      totalDuration: allDuration ? totalDuration : null,
+    };
+  }
+  function loadReferenceEntries(voiceId) {
+    if (referenceEntriesCache.has(voiceId)) return Promise.resolve(referenceEntriesCache.get(voiceId));
+    if (referenceEntriesInflight.has(voiceId)) return referenceEntriesInflight.get(voiceId);
+    const pending = api(`/api/voices/${encodeURIComponent(voiceId)}/reference-entries`).then(data => {
+      referenceEntriesCache.set(voiceId, data);
+      referenceEntriesInflight.delete(voiceId);
+      return data;
+    }, error => {
+      referenceEntriesInflight.delete(voiceId);
+      throw error;
+    });
+    referenceEntriesInflight.set(voiceId, pending);
+    return pending;
+  }
+  async function loadUploadMetadata(upload) {
+    if (!upload?.id) return null;
+    if (Object.hasOwn(upload, 'bytes') && Object.hasOwn(upload, 'duration')
+        && Object.hasOwn(upload, 'readable')) return upload;
+    if (!referenceUploadCache.has(upload.id)) {
+      referenceUploadCache.set(upload.id, api(`/api/reference-audio/${encodeURIComponent(upload.id)}`)
+        .then(data => ({ ...upload, ...data })));
+    }
+    return referenceUploadCache.get(upload.id);
+  }
+  function explicitLibraryBindings(selection = flow.referenceSelection, speaker = 0) {
+    if (selection === null || selection === undefined) return null;
+    const voiceId = selection.voiceId;
+    const voice = voiceById(voiceId);
+    if (!voice) throw new Error(t('Reference audio is missing'));
+    return (selection.keys || []).map(key => {
+      if (key.startsWith('reference:')) {
+        const audio = key.slice('reference:'.length);
+        const clip = (voice.references || []).find(reference => reference.audio === audio);
+        if (!clip) throw new Error(t('Reference audio is missing'));
+        const problem = referenceTranscriptProblem(clip.transcript, speaker);
+        if (problem === 'empty') throw new Error(t('Enter the exact words spoken in the reference audio.'));
+        if (problem === 'speaker') {
+          throw new Error(t('Reference transcript speaker does not match the selected speaker'));
+        }
+        return { voice_id: voiceId, reference_audio: audio, speaker };
+      }
+      if (key.startsWith('asset:')) {
+        const assetId = key.slice('asset:'.length);
+        if (!/^[a-f0-9]{32}$/.test(assetId)) throw new Error(t('Selected clip is no longer available'));
+        return { voice_id: voiceId, asset_id: assetId, speaker };
+      }
+      throw new Error(t('Selected clip is no longer available'));
+    });
+  }
   function refreshCreationVoiceLabels() {
     for (const card of document.querySelectorAll('.voice-pick[data-voice]')) {
       const voice = voiceById(card.dataset.voice), label = card.querySelector('small');
@@ -1077,31 +1201,41 @@
       label.textContent = t('{count} audio entries', { count: total });
     }
   }
+  function creationSelectionClearsUploads() {
+    return voiceDesignActive() || Boolean(flow.operation) || Boolean(flow.restoredFrom)
+      || ['revision', 'edit', 'infill', 'stream'].includes($('mode').value);
+  }
   async function applyCreationSelection(selection) {
     const normalized = normalizeReferenceSelection(selection);
     if (!normalized) return;
     const designing = voiceDesignActive();
     if (designing) switchVoiceSource('reference');
-    const fixed = designing || flow.operation || flow.restoredFrom
-      || ['revision', 'edit', 'infill', 'stream'].includes($('mode').value);
+    const fixed = creationSelectionClearsUploads();
     if (fixed) {
       await save(); stash();
       flow.single = fresh('single'); flow.operation = null;
       flow.restoredFrom = flow.restoredModel = null;
       $('previous-take').value = $('source-take').value = ''; $('mode').value = 'tts';
       clearMonitoredResult();
+      clearCloneAudio();
+      const extra = flow.singleReferences; flow.singleReferences = [];
+      for (const reference of extra) ReferencePrep.cancel(reference);
+      renderExtraReferences();
+    } else if (!normalized.keys.length) {
+      clearCloneAudio();
+      const extra = flow.singleReferences; flow.singleReferences = [];
+      for (const reference of extra) ReferencePrep.cancel(reference);
+      renderExtraReferences();
     }
-    clearCloneAudio();
-    const extra = flow.singleReferences; flow.singleReferences = [];
-    for (const reference of extra) ReferencePrep.cancel(reference);
-    renderExtraReferences();
     flow.referenceSelection = { voiceId: normalized.voiceId, keys: normalized.keys.slice() };
+    flow.referenceSelectionLegacy = false;
     state.selectedVoiceIds = new Set(normalized.keys.length ? [normalized.voiceId] : []);
     updateVoiceSelection(); updateMode(); updateEditorMeta(); renderOperation();
     if (state.view !== 'generate') view('generate');
     $('saved-voice-options').open = false;
     if (typeof renderVoices === 'function') renderVoices();
     saveSoon();
+    window.ReferencePrewarm?.schedule();
   }
   function referenceMetaDuration(value) {
     if (!Number.isFinite(value)) return '--:--';
@@ -1118,6 +1252,7 @@
   }
   function openReferencePicker({ context, initialVoiceId, confirmed, onConfirm }) {
     stopVoicePreview();
+    referenceEntriesCache.clear();
     document.querySelectorAll('audio').forEach(audio => audio.pause());
     const initial = normalizeReferenceSelection(confirmed);
     const working = { voiceId: initial?.voiceId || initialVoiceId || null,
@@ -1152,9 +1287,11 @@
     const voiceHost = node('div', 'reference-picker-voice-list');
     const entryWrap = node('div', 'reference-picker-entry-wrap');
     const entryMessage = node('p', 'field-help reference-picker-message');
+    const validationNotice = node('p', 'form-note reference-picker-validation');
+    validationNotice.setAttribute('role', 'alert'); validationNotice.hidden = true;
     const entryNotice = node('p', 'form-note reference-picker-notice'); entryNotice.hidden = true;
     const entryList = node('div', 'reference-picker-entry-list');
-    entryWrap.append(entryMessage, entryNotice, entryList);
+    entryWrap.append(entryMessage, validationNotice, entryNotice, entryList);
     dialog.body.classList.add('reference-picker-body');
     dialog.body.append(top, voiceHost, entryWrap);
     const stats = node('span', 'reference-picker-stats');
@@ -1171,6 +1308,8 @@
     const NO_TAG = '__none__';
     const playback = new Audio(); playback.preload = 'metadata';
     let playingKey = null, playToken = 0;
+    let validating = false, validationRequest = 0;
+    let validationState = { ok: true, errors: [], items: [], totalBytes: 0, totalDuration: 0 };
 
     function setNotice(text) {
       entryNotice.textContent = text || ''; entryNotice.hidden = !text;
@@ -1224,21 +1363,25 @@
       const visibleKeys = new Set(entries.filter(entry => !rows.get(entry.key)?.row.hidden)
         .map(entry => entry.key));
       const hiddenCount = selectedEntries.filter(entry => !visibleKeys.has(entry.key)).length;
-      let bytes = null, duration = null;
-      if (selectedEntries.length && selectedEntries.every(entry => Number.isFinite(entry.bytes))) {
-        bytes = selectedEntries.reduce((sum, entry) => sum + entry.bytes, 0);
-      }
-      if (selectedEntries.length && selectedEntries.every(entry => Number.isFinite(entry.duration))) {
-        duration = selectedEntries.reduce((sum, entry) => sum + entry.duration, 0);
-      }
-      stats.textContent = [
+      const requestItems = validationState.items || [];
+      const parts = [
         t('{count} selected', { count: selectedEntries.length }),
         `${t('Hidden selected')} ${hiddenCount}`,
         t('{count} matching', { count: matched }),
-        bytes == null ? '' : referenceMetaBytes(bytes),
-        duration == null ? '' : referenceMetaDuration(duration),
-      ].filter(Boolean).join(' · ');
-      confirm.disabled = loading || Boolean(loadError) || !working.voiceId;
+      ];
+      if (requestItems.length) {
+        parts.push(t('{count} in request', { count: requestItems.length }));
+      }
+      if (requestItems.length && validationState.totalBytes != null) {
+        parts.push(referenceMetaBytes(validationState.totalBytes));
+      }
+      if (requestItems.length && validationState.totalDuration != null) {
+        parts.push(referenceMetaDuration(validationState.totalDuration));
+      }
+      if (validating) parts.push(t('Checking references…'));
+      stats.textContent = parts.filter(Boolean).join(' · ');
+      confirm.disabled = loading || Boolean(loadError) || !working.voiceId
+        || validating || !validationState.ok;
     }
     function syncSelectionUI() {
       for (const state of rows.values()) state.checkbox.checked = working.keys.has(state.entry.key);
@@ -1247,7 +1390,154 @@
       selectAll.disabled = loading || Boolean(loadError) || !visible.length;
       selectAll.checked = visible.length > 0 && selected === visible.length;
       selectAll.indeterminate = selected > 0 && selected < visible.length;
+      scheduleValidation();
       syncFooter();
+    }
+    function renderValidation() {
+      if (validating) {
+        validationNotice.textContent = t('Checking references…');
+        validationNotice.hidden = false;
+      } else if (validationState.errors.length) {
+        validationNotice.textContent = validationState.errors.join('；');
+        validationNotice.hidden = false;
+      } else {
+        validationNotice.hidden = true;
+        validationNotice.textContent = '';
+      }
+    }
+    function validationEntry(entry, speaker, prefix = '') {
+      return {
+        key: entry.key, label: `${prefix}${entry.filename}`, text: entry.text,
+        bytes: entry.bytes, duration: entry.duration, speaker,
+        readable: entry.readable !== false,
+      };
+    }
+    function localValidationItems(speaker, prefix = '') {
+      return entries.filter(entry => working.keys.has(entry.key))
+        .map(entry => validationEntry(entry, speaker, prefix));
+    }
+    async function remoteSelectionItems(voiceId, keys, speaker, prefix = '') {
+      const data = await loadReferenceEntries(voiceId);
+      const byKey = new Map((data.entries || []).map(entry => [entry.key, entry]));
+      return keys.map(key => {
+        const entry = byKey.get(key);
+        if (!entry) return {
+          key, label: `${prefix}${key}`, text: '', bytes: null, duration: null,
+          speaker, missing: true,
+        };
+        return validationEntry(entry, speaker, prefix);
+      });
+    }
+    async function uploadValidationItems(reference, speaker, prefix = '') {
+      const items = [];
+      const upload = reference?.upload;
+      const text = String(reference?.transcript || '');
+      const label = upload?.filename || reference?.filename || t('Reference');
+      if (!upload?.id) {
+        items.push({ key: `upload:${reference?.key || label}`, label: `${prefix}${label}`,
+          text, bytes: null, duration: null, speaker, missing: true });
+      } else {
+        let meta = upload, failed = false;
+        try { meta = await loadUploadMetadata(upload) || upload; }
+        catch (_) {
+          failed = true;
+          items.push({ key: `upload:${upload.id}`, label: `${prefix}${label}`, text,
+            bytes: null, duration: null, speaker, missing: true,
+            error: t('Could not read reference metadata for “{name}”.', { name: label }) });
+        }
+        if (!failed) {
+          items.push({
+            key: `upload:${upload.id}`, label: `${prefix}${meta.filename || label}`, text,
+            bytes: meta.bytes, duration: meta.duration, speaker, readable: meta.readable,
+          });
+        }
+      }
+      for (const child of reference?.groupReferences || []) {
+        items.push(...await uploadValidationItems(child, speaker, prefix));
+      }
+      return items;
+    }
+    async function creationUploadItems() {
+      const items = [];
+      if (state.cloneMissing) {
+        items.push({ key: 'upload:clone', label: state.cloneUpload?.filename || t('Reference'),
+          text: $('clone-transcript').value, bytes: null, duration: null, speaker: 0,
+          missing: true });
+      } else if (state.cloneFile) {
+        let meta = state.cloneUpload;
+        if (meta?.id) {
+          try { meta = await loadUploadMetadata(meta) || meta; } catch (_) { /* file is local */ }
+        }
+        const audioDuration = Number($('clone-file-audio').duration);
+        const duration = Number.isFinite(meta?.duration) ? meta.duration
+          : (Number.isFinite(audioDuration) && audioDuration > 0 ? audioDuration : null);
+        items.push({
+          key: 'upload:clone', label: state.cloneFile.name, text: $('clone-transcript').value,
+          bytes: state.cloneFile.size, duration, speaker: 0,
+          readable: meta?.readable !== false,
+          error: state.cloneCropping ? t('Wait for audio cropping to finish.') : '',
+        });
+      }
+      for (const reference of flow.singleReferences) {
+        items.push(...await uploadValidationItems(reference, 0));
+      }
+      return items;
+    }
+    async function roleBoundValidationItems(role) {
+      const items = [], prefix = `${speakerLabel(role)} · `;
+      const selection = roleReferenceSelection(role);
+      if (selection) {
+        if (selection.keys.length) {
+          items.push(...await remoteSelectionItems(
+            selection.voiceId, selection.keys, role.speaker, prefix));
+        }
+      } else if (role.upload) {
+        items.push(...await uploadValidationItems({
+          upload: role.upload, transcript: role.transcript,
+        }, role.speaker, prefix));
+      }
+      for (const reference of role.extraReferences || []) {
+        items.push(...await uploadValidationItems(reference, role.speaker, prefix));
+      }
+      return items;
+    }
+    async function buildValidationItems() {
+      const creation = context === 'creation';
+      const role = creation ? null : flow.scene.roles.find(item => item.id === context);
+      if (!creation && !role) throw new Error(t('This speaker is no longer in the dialogue.'));
+      const speaker = creation ? 0 : role.speaker;
+      const items = localValidationItems(speaker, creation ? '' : `${speakerLabel(role)} · `);
+      if (creation) {
+        if (working.keys.size && !creationSelectionClearsUploads()) {
+          items.push(...await creationUploadItems());
+        }
+      } else if (flow.scene.strategy === 'joint') {
+        const used = new Set(flow.scene.lines.filter(line => String(line.text || '').trim())
+          .map(line => line.characterId));
+        for (const other of flow.scene.roles) {
+          if (other.id === role.id || !used.has(other.id)) continue;
+          items.push(...await roleBoundValidationItems(other));
+        }
+      }
+      return items;
+    }
+    function scheduleValidation() {
+      if (mode !== 'entries' || loading || loadError || !working.voiceId) return;
+      const voiceId = working.voiceId, token = ++validationRequest;
+      validating = true;
+      validationState = { ok: true, errors: [], items: [], totalBytes: 0, totalDuration: 0 };
+      renderValidation(); syncFooter();
+      buildValidationItems().then(items => {
+        if (token !== validationRequest || !dialog.element.open || mode !== 'entries'
+            || working.voiceId !== voiceId) return;
+        validationState = validateReferenceRequest(items);
+        validating = false; renderValidation(); syncFooter();
+      }).catch(error => {
+        if (token !== validationRequest || !dialog.element.open) return;
+        validationState = { ok: false, errors: [message(error.message)], items: [],
+          totalBytes: null, totalDuration: null };
+        validating = false; renderValidation(); syncFooter();
+      });
     }
     function matches(entry) {
       if (filter.query) {
@@ -1357,8 +1647,14 @@
         voiceHost.append(item);
       }
     }
+    function resetValidation() {
+      validationRequest += 1; validating = false;
+      validationState = { ok: true, errors: [], items: [], totalBytes: 0, totalDuration: 0 };
+      validationNotice.hidden = true; validationNotice.textContent = '';
+    }
     function showVoices() {
       request += 1; loading = false; loadError = ''; mode = 'voices';
+      resetValidation();
       releasePreview(); setView(); renderVoiceList(); entryList.replaceChildren();
       rows = new Map(); entries = []; matched = 0; stats.textContent = '';
     }
@@ -1366,6 +1662,7 @@
       const token = ++request;
       if (working.voiceId !== voiceId) { working.voiceId = voiceId; working.keys = new Set(); }
       mode = 'entries'; loading = true; loadError = '';
+      resetValidation();
       releasePreview(); setView(); setNotice('');
       const voice = voiceById(voiceId);
       voiceName.textContent = voice?.name || voiceId;
@@ -1392,11 +1689,11 @@
         entryMessage.hidden = false; entryMessage.textContent = loadError;
         setNotice(loadError);
       } finally {
-        if (token === request) { loading = false; confirm.disabled = Boolean(loadError) || !working.voiceId; }
+        if (token === request) { loading = false; syncFooter(); }
       }
     }
     function confirmSelection() {
-      if (loading || loadError || !working.voiceId) return;
+      if (loading || loadError || validating || !validationState.ok || !working.voiceId) return;
       const keys = entries.filter(entry => working.keys.has(entry.key)).map(entry => entry.key);
       const selection = { voiceId: working.voiceId, keys };
       releasePreview(); dialog.close(); onConfirm(selection);
@@ -1409,10 +1706,10 @@
       syncSelectionUI();
     };
     search.oninput = () => { filter.query = search.value.normalize('NFKC').toLowerCase().trim(); applyFilter(); };
-    dialog.element.addEventListener('close', () => { request += 1; releasePreview(); });
-    dialog.element.addEventListener('cancel', () => { request += 1; releasePreview(); });
+    dialog.element.addEventListener('close', () => { request += 1; resetValidation(); releasePreview(); });
+    dialog.element.addEventListener('cancel', () => { request += 1; resetValidation(); releasePreview(); });
     dialog.element.querySelector('.studio-dialog-heading .icon-btn')
-      ?.addEventListener('click', () => { request += 1; releasePreview(); });
+      ?.addEventListener('click', () => { request += 1; resetValidation(); releasePreview(); });
     setView(); renderVoiceList();
     dialog.show();
     if (initialVoiceId) showEntries(initialVoiceId);
@@ -1476,10 +1773,9 @@
     if (operation?.legacy) {
       payload.legacy_source = operation.source; payload.operation = operation.action;
     }
-    renderLibraryReferences();
-    const references = [...flow.libraryReferences, ...flow.singleReferences];
+    if (flow.referenceSelection === null || flow.referenceSelectionLegacy) renderLibraryReferences();
     payload.voice_bindings = payload.mode === 'infill' ? [] : await singleBindings(
-      payload.uploaded_references ?? null, references);
+      payload.uploaded_references ?? null);
     if (!['revision', 'edit'].includes(payload.mode)) delete payload.previous_take;
     return payload;
   }
@@ -1491,11 +1787,7 @@
     if (!syncCloneAudioSelection()) return null;
     if (state.cloneFile && !$('clone-transcript').value.trim()) return null;
     try {
-      const primary = state.cloneFile ? await prepareCloneReference() : [];
-      const references = [...flow.libraryReferences, ...flow.singleReferences];
-      const groups = await Promise.all(references.map(reference =>
-        ReferencePrep.readAll(reference, 0)));
-      return { voice_bindings: [...primary, ...groups.flat()] };
+      return { voice_bindings: await singleBindings() };
     } catch (_) {
       return null;
     }
@@ -1536,7 +1828,9 @@
           'text-btn selected-library-select');
         const clear = command('Remove audio', () => {
           stopVoicePreview(); state.selectedVoiceIds.delete(reference.libraryId);
-          if (flow.referenceSelection?.voiceId === reference.libraryId) flow.referenceSelection = null;
+          if (flow.referenceSelection?.voiceId === reference.libraryId) {
+        flow.referenceSelection = null; flow.referenceSelectionLegacy = false;
+      }
           updateVoiceSelection(); saveSoon(); window.ReferencePrewarm?.schedule(0);
         }, 'icon-btn selected-voice-clear');
         delete clear.dataset.i18n; clear.innerHTML = icon('close');
@@ -1560,18 +1854,20 @@
     $('clone-upload-zone').classList.toggle('hidden',
       Boolean(state.cloneFile || state.cloneMissing || flow.libraryReferences.length));
   }
-  async function singleBindings(uploaded = null, references = null) {
+  async function singleBindings(uploaded = null) {
     if (!syncCloneAudioSelection()) throw new Error($('clone-note').textContent);
     const revision = state.cloneRevision;
-    if (!references) { renderLibraryReferences(); references = [...flow.libraryReferences, ...flow.singleReferences]; }
-    const [primary, groups] = await Promise.all([
-      uploaded === null ? prepareCloneReference() : uploaded,
-      Promise.all(references.map(reference => ReferencePrep.readAll(reference, 0))),
-    ]);
+    const primary = uploaded === null ? await prepareCloneReference() : uploaded;
+    const library = flow.referenceSelection !== null && !flow.referenceSelectionLegacy
+      ? explicitLibraryBindings()
+      : (await Promise.all(flow.libraryReferences.map(reference =>
+        ReferencePrep.readAll(reference, 0)))).flat();
+    const extra = (await Promise.all(flow.singleReferences.map(reference =>
+      ReferencePrep.readAll(reference, 0)))).flat();
     if (!syncCloneAudioSelection() || revision !== state.cloneRevision) {
       throw new Error(t('Reference changed. Click Generate again.'));
     }
-    return [...primary, ...groups.flat()];
+    return [...primary, ...library, ...extra];
   }
   async function savePreparedVoice() {
     const references = await singleBindings();
@@ -2478,6 +2774,7 @@
     clearReferenceSelection: () => {
       if (flow.restoring) return;
       flow.referenceSelection = null;
+      flow.referenceSelectionLegacy = false;
       if ($('selected-reference-details')) renderLibraryReferences();
       if (typeof renderVoices === 'function') renderVoices();
       saveSoon();

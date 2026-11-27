@@ -906,6 +906,21 @@
     ['Loading audio…', '正在读取音频…', '音声を読み込み中…', '오디오 불러오는 중…'],
     ['Select audio', '选择音频', '音声を選択', '오디오 선택'],
     ['Manage voice', '管理语音', '音声を管理', '음성 관리'],
+    ['{count} in request', '请求 {count} 条', 'リクエスト {count}件', '요청 {count}개'],
+    ['Checking references…', '正在校验参考…', '参照を確認中…', '참조 확인 중…'],
+    ['{count} references selected; {over} over the 32-reference limit.', '已选 {count} 条，超过单次 32 条上限 {over} 条。', '参照 {count}件で、32件の上限を{over}件超えています。', '참조 {count}개로 32개 한도를 {over}개 초과합니다.'],
+    ['Reference “{name}” audio is missing or unreadable.', '参考“{name}”音频缺失或无法读取。', '参照「{name}」の音声が見つからないか読み取れません。', '참조 “{name}” 오디오가 없거나 읽을 수 없습니다.'],
+    ['Could not read the size of “{name}”.', '无法读取“{name}”的大小。', '「{name}」のサイズを読み取れません。', '“{name}” 크기를 읽을 수 없습니다.'],
+    ['Reference “{name}” exceeds 128 MiB.', '参考“{name}”超过 128 MiB。', '参照「{name}」が128 MiBを超えています。', '참조 “{name}”이 128 MiB를 초과합니다.'],
+    ['Reference “{name}” must be longer than 0 and at most 120 seconds.', '参考“{name}”时长必须大于 0 秒且不超过 120 秒。', '参照「{name}」は0秒より長く120秒以内にしてください。', '참조 “{name}” 길이는 0초보다 길고 120초 이하여야 합니다.'],
+    ['Reference “{name}” needs a saved transcript.', '参考“{name}”需要已保存的逐字稿。', '参照「{name}」に保存済みの書き起こしが必要です。', '참조 “{name}”에 저장된 텍스트가 필요합니다.'],
+    ['Reference “{name}” speaker markers do not match.', '参考“{name}”的说话人标记不匹配。', '参照「{name}」の話者マーカーが一致しません。', '참조 “{name}” 화자 표시가 일치하지 않습니다.'],
+    ['Total reference size {size} exceeds 256 MiB by {over}.', '参考总大小 {size}，超过 256 MiB 上限 {over}。', '参照の合計サイズ {size} が256 MiBを{over}超えています。', '참조 총 크기 {size}가 256 MiB를 {over} 초과합니다.'],
+    ['Could not read reference metadata for “{name}”.', '无法读取“{name}”的参考元数据。', '「{name}」の参照メタデータを読み取れません。', '“{name}” 참조 메타데이터를 읽을 수 없습니다.'],
+    ['This speaker is no longer in the dialogue.', '该说话人已不在对话中。', 'この話者は対話に存在しません。', '이 화자가 대화에 없습니다.'],
+    ['Reference transcript speaker does not match the selected speaker', '参考逐字稿的说话人标记与所选说话人不一致。', '参照の書き起こしの話者マーカーが選択した話者と一致しません。', '참조 텍스트의 화자 표시가 선택한 화자와 일치하지 않습니다.'],
+    ['Reference', '参考音频', '参照音声', '참조 오디오'],
+    ['Selected clip is no longer available', '所选素材已不存在。', '選択した素材はもう存在しません。', '선택한 소재가 더 이상 없습니다.'],
   ];
   const locales = ['zh-CN', 'en', 'ja', 'ko'];
   const index = { en: 0, 'zh-CN': 1, ja: 2, ko: 3 };
