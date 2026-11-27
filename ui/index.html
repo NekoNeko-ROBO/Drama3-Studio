@@ -247,6 +247,7 @@
             <button id="voice-detail-back" class="secondary-btn" type="button">
               返回音色库
             </button>
+            <span id="voice-detail-save-notice" class="voice-detail-save-notice" role="status" hidden></span>
             <h2 id="voice-detail-name"></h2>
             <span id="voice-detail-count" class="badge">0</span>
           </div>
@@ -420,6 +421,16 @@
     <div class="studio-dialog-footer">
       <button id="delete-cancel" class="secondary-btn" type="button" data-i18n="Cancel" autofocus>Cancel</button>
       <button id="delete-confirm" class="secondary-btn danger-button" type="button"><span data-i18n="Delete">Delete</span></button>
+    </div>
+  </dialog>
+  <dialog id="voice-detail-leave-dialog" class="studio-dialog voice-detail-leave-dialog" aria-labelledby="voice-detail-leave-title" aria-describedby="voice-detail-leave-description">
+    <div class="studio-dialog-heading"><h2 id="voice-detail-leave-title">有未保存的修改</h2><button id="voice-detail-leave-close" type="button" class="icon-btn" title="继续编辑" aria-label="继续编辑"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <div class="studio-dialog-body">
+      <p id="voice-detail-leave-description">返回音色库将丢失尚未保存的文字。</p>
+    </div>
+    <div class="studio-dialog-footer">
+      <button id="voice-detail-leave-discard" class="secondary-btn" type="button">放弃修改并返回</button>
+      <button id="voice-detail-leave-keep" class="primary-btn" type="button" autofocus>继续编辑</button>
     </div>
   </dialog>
   <script src="/assets/i18n.js"></script>

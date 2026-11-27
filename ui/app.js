@@ -1315,7 +1315,18 @@ function previewVoice(voice, button) {
     } else addEvent({ stage: 'error', message: t('Unable to play this audio.') });
   });
 }
-function closeVoiceDetail() {
+function voiceDetailSaving() {
+  return [...$('voice-detail').querySelectorAll('textarea')].some(editor => editor.disabled);
+}
+
+function setVoiceDetailNotice(text) {
+  const notice = $('voice-detail-save-notice');
+  notice.textContent = text;
+  notice.hidden = !text;
+}
+
+function leaveVoiceDetail() {
+  setVoiceDetailNotice('');
   stopVoicePreview();
   $('voice-detail').querySelectorAll('audio').forEach(audio => audio.pause());
   $('voice-detail').hidden = true;
@@ -1324,10 +1335,47 @@ function closeVoiceDetail() {
   renderVoices();
 }
 
+function openVoiceDetailLeaveDialog() {
+  const dialog = $('voice-detail-leave-dialog');
+  if (dialog.open) return;
+  dialog.onclose = () => {
+    const target = $('voice-detail').hidden ? $('voice-search') : $('voice-detail-back');
+    if (target && target.getClientRects().length) target.focus();
+  };
+  $('voice-detail-leave-close').onclick = () => dialog.close();
+  $('voice-detail-leave-keep').onclick = () => dialog.close();
+  $('voice-detail-leave-discard').onclick = () => {
+    if (voiceDetailSaving()) {
+      dialog.close();
+      setVoiceDetailNotice('正在保存，请稍候再返回。');
+      return;
+    }
+    leaveVoiceDetail();
+    dialog.close();
+  };
+  dialog.showModal();
+  $('voice-detail-leave-keep').focus();
+}
+
+function closeVoiceDetail() {
+  if (voiceDetailSaving()) {
+    setVoiceDetailNotice('正在保存，请稍候再返回。');
+    return;
+  }
+  const unsaved = [...$('voice-detail').querySelectorAll('textarea')]
+    .some(editor => editor.value !== editor.defaultValue);
+  if (unsaved) {
+    openVoiceDetailLeaveDialog();
+    return;
+  }
+  leaveVoiceDetail();
+}
+
 function openVoiceDetail(voiceId) {
   const voice = voiceById(voiceId);
   if (!voice) return;
 
+  setVoiceDetailNotice('');
   stopVoicePreview();
   const detail = $('voice-detail');
   detail.querySelectorAll('audio').forEach(audio => audio.pause());
@@ -1361,6 +1409,7 @@ function openVoiceDetail(voiceId) {
     const text = document.createElement('td');
     const editor = document.createElement('textarea');
     editor.value = clip.transcript || '';
+    editor.defaultValue = editor.value;
     editor.rows = 2;
     editor.setAttribute('aria-label', `第 ${index + 1} 条语音的对应文字`);
 
@@ -1399,12 +1448,14 @@ function openVoiceDetail(voiceId) {
         const position = state.voices.findIndex(item => item.id === voiceId);
         if (position !== -1) state.voices[position] = updated;
         editor.value = updated.references[index].transcript;
+        editor.defaultValue = editor.value;
         status.textContent = '已保存';
       } catch (error) {
         status.textContent = `保存失败：${error.message}`;
       } finally {
         save.disabled = false;
         editor.disabled = false;
+        if (!voiceDetailSaving()) setVoiceDetailNotice('');
       }
     };
 

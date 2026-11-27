@@ -907,3 +907,13 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
 #voice-detail .voice-detail-table [role="status"] {
   font-size: 13px;
 }
+
+/* 语音详情：保存中提示与未保存修改对话框（本模块新增） */
+.voice-detail-save-notice {
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.voice-detail-leave-dialog {
+  background: #fff;
+}
