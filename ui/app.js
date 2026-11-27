@@ -1333,6 +1333,17 @@ function leaveVoiceDetail() {
   setVoiceDetailNotice('');
   voiceDetail.id = null;
   voiceDetail.assets = [];
+  voiceDetailSelection.clear();
+  voiceDetailBatch.runId += 1;
+  voiceDetailBatch.running = false;
+  voiceDetailBatch.stop = false;
+  voiceDetailSaveBatch.runId += 1;
+  voiceDetailSaveBatch.running = false;
+  voiceDetailDeleteBatch.runId += 1;
+  voiceDetailDeleteBatch.running = false;
+  setVoiceDetailBatchStatus('');
+  setVoiceDetailSaveBatchStatus('');
+  setVoiceDetailActionStatus('');
   setVoiceDetailImportStatus('');
   stopVoicePreview();
   unloadVoiceDetailAudio($('voice-detail'));
@@ -1365,6 +1376,18 @@ function openVoiceDetailLeaveDialog() {
 }
 
 function closeVoiceDetail() {
+  if (voiceDetailSaveBatch.running) {
+    setVoiceDetailNotice('正在批量保存，请稍候再返回。');
+    return;
+  }
+  if (voiceDetailBatch.running) {
+    setVoiceDetailNotice('批量识别进行中，请先停止并等待当前条完成后返回。');
+    return;
+  }
+  if (voiceDetailDeleteBatch.running) {
+    setVoiceDetailNotice('正在批量删除，请稍候再返回。');
+    return;
+  }
   if (voiceDetail.importing) {
     setVoiceDetailNotice('正在导入音频，请稍候再返回。');
     return;
@@ -1419,99 +1442,165 @@ function voiceDetailCandidateBlock() {
   return { box, text, adopt, close };
 }
 
+const voiceDetailBatch = { running: false, stop: false, runId: 0 };
+const voiceDetailSaveBatch = { running: false, runId: 0 };
+const voiceDetailDeleteBatch = { running: false, runId: 0 };
+
 function voiceDetailIdentifier({ row, editor, status, identify, save, adopt, close, box, text, startTask }) {
-  let running = false, session = null, candidate = '', hasCandidate = false;
+  let running = false, session = null, candidate = '', hasCandidate = false, candidatePending = false;
   const label = () => { identify.textContent = hasCandidate ? '重新识别' : '识别文字'; };
   identify.textContent = '识别文字';
-  identify.onclick = async () => {
+
+  const finish = started => {
+    if (started.timer) clearTimeout(started.timer);
+    started.timer = null;
+    if (!started.current()) return;
+    running = false;
+    const locked = voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running;
+    identify.disabled = locked;
+    save.disabled = locked;
+    if (session === started) session = null;
+    label();
+  };
+
+  const run = async ({ force = hasCandidate, autoFill = false } = {}) => {
     if (editor.disabled) {
       status.textContent = '正在保存文字，请稍候再识别。';
-      return;
+      return { status: 'error', error: '正在保存文字' };
     }
-    if (running) return;
+    if (running) return { status: 'ignored' };
     const voiceId = voiceDetail.id, request = voiceDetail.request;
-    const started = { voiceId, request, taskId: null, timer: null };
+    const started = {
+      voiceId, request, taskId: null, timer: null,
+      current: () => row.isConnected && voiceDetail.id === voiceId
+        && voiceDetail.request === request && session === started,
+    };
     session = started;
-    const current = () => row.isConnected && voiceDetail.id === voiceId
-      && voiceDetail.request === request && session === started;
+    const startValue = editor.value, startBaseline = editor.defaultValue;
     running = true;
     identify.disabled = true;
     save.disabled = true;
     box.hidden = true;
+    candidatePending = false;
     status.textContent = '排队中…';
-    const finish = () => {
-      if (started.timer) clearTimeout(started.timer);
-      started.timer = null;
-      if (!current()) return;
-      running = false;
-      identify.disabled = false;
-      save.disabled = false;
-      if (session === started) session = null;
-      label();
-    };
+
+    let settle;
+    const done = new Promise(resolve => { settle = resolve; });
     const poll = async () => {
-      if (!current()) return;
+      if (!started.current()) {
+        settle({ status: 'error', error: '识别已中断' });
+        return;
+      }
       try {
         const task = await api(`/api/transcriptions/${encodeURIComponent(started.taskId)}`);
-        if (!current()) return;
+        if (!started.current()) {
+          settle({ status: 'error', error: '识别已中断' });
+          return;
+        }
         if (task.status === 'complete') {
           const value = task.result?.text || '';
           if (!value) throw new Error('识别结果为空');
           candidate = value;
           text.textContent = value;
-          box.hidden = false;
           hasCandidate = true;
-          status.textContent = '识别完成';
-          finish();
+          const untouched = autoFill && startValue.trim() === ''
+            && startValue === startBaseline
+            && editor.value === startValue && editor.defaultValue === startBaseline;
+          if (untouched) {
+            editor.value = value;
+            box.hidden = true;
+            candidatePending = false;
+            status.textContent = '尚未保存';
+          } else {
+            box.hidden = false;
+            candidatePending = true;
+            status.textContent = '识别完成';
+          }
+          finish(started);
+          settle({ status: 'complete', text: value, autoFilled: untouched });
           return;
         }
         if (task.status === 'skipped') {
           status.textContent = task.reason === 'model_unavailable'
             ? '本机未安装识别模型（checkpoints/Qwen3-ASR-0.6B-hf），无法识别。'
             : '识别已跳过，可稍后重试。';
-          finish();
+          finish(started);
+          settle({ status: 'skipped', reason: task.reason });
           return;
         }
         if (task.status === 'error') {
           status.textContent = `识别失败：${task.error || '未知错误'}`;
-          finish();
+          finish(started);
+          settle({ status: 'error', error: task.error || '未知错误' });
+          return;
+        }
+        if (task.status !== 'running' && task.status !== 'queued') {
+          status.textContent = `识别失败：未知任务状态 ${task.status}`;
+          finish(started);
+          settle({ status: 'error', error: `未知任务状态 ${task.status}` });
           return;
         }
         status.textContent = task.status === 'running' ? '识别中…' : '排队中…';
         started.timer = setTimeout(poll, 1200);
       } catch (error) {
-        if (!current()) return;
-        status.textContent = `识别失败：${error.message}`;
-        finish();
+        if (started.current()) {
+          status.textContent = `识别失败：${error.message}`;
+          finish(started);
+        }
+        settle({ status: 'error', error: error.message });
       }
     };
+
     try {
-      const task = await startTask(hasCandidate, voiceId);
-      if (!current()) return;
+      const task = await startTask(force, voiceId);
+      if (!started.current()) {
+        settle({ status: 'error', error: '识别已中断' });
+        return done;
+      }
       started.taskId = task.id;
       poll();
     } catch (error) {
-      if (!current()) return;
-      status.textContent = `识别失败：${error.message}`;
-      finish();
+      if (started.current()) {
+        status.textContent = `识别失败：${error.message}`;
+        finish(started);
+      }
+      settle({ status: 'error', error: error.message });
     }
+    return done;
   };
-  adopt.onclick = () => {
-    if (editor.disabled) {
-      status.textContent = '正在保存文字，请稍候再采用。';
+
+  identify.onclick = () => {
+    if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) {
+      status.textContent = '批量操作进行中，请稍候。';
       return;
     }
-    if (!candidate) return;
+    run({ force: hasCandidate }).catch(() => {});
+  };
+  const adoptCandidate = () => {
+    if (editor.disabled) {
+      status.textContent = '正在保存文字，请稍候再采用。';
+      return null;
+    }
+    if (!candidatePending || !candidate) return null;
     editor.value = candidate;
     box.hidden = true;
-    status.textContent = '尚未保存';
+    candidatePending = false;
+    status.textContent = editor.value === editor.defaultValue ? '已保存' : '尚未保存';
+    return { text: editor.value };
   };
+  adopt.onclick = () => { adoptCandidate(); };
   close.onclick = () => {
     box.hidden = true;
+    candidatePending = false;
     if (status.textContent !== '识别完成') return;
     status.textContent = editor.value !== editor.defaultValue ? '尚未保存' : '';
   };
-  return { isRunning: () => running };
+  return {
+    isRunning: () => running,
+    run,
+    hasPendingCandidate: () => candidatePending,
+    adoptCandidate,
+  };
 }
 
 const voiceDetailRowState = new WeakMap();
@@ -1715,16 +1804,15 @@ function voiceDetailPlayer({ audioUrl, preload, onDelete, deleteLabel }) {
 }
 
 function renumberVoiceDetailRows() {
+  const setNumber = (row, value) => {
+    const text = row.querySelector('.voice-detail-number-text');
+    if (text) text.textContent = value;
+  };
   const referenceRows = [...$('voice-detail-rows').children];
-  referenceRows.forEach((row, index) => {
-    const cell = row.querySelector('.voice-detail-number');
-    if (cell) cell.textContent = index + 1;
-  });
-  [...$('voice-detail-assets').children].forEach((row, index) => {
-    const cell = row.querySelector('.voice-detail-number');
-    if (cell) cell.textContent = referenceRows.length + index + 1;
-  });
+  referenceRows.forEach((row, index) => setNumber(row, index + 1));
+  [...$('voice-detail-assets').children].forEach((row, index) => setNumber(row, referenceRows.length + index + 1));
   updateVoiceDetailCount();
+  refreshVoiceDetailSelection();
 }
 
 function referenceIndexFor(voiceId, clip) {
@@ -1732,16 +1820,101 @@ function referenceIndexFor(voiceId, clip) {
   return (voice?.references || []).findIndex(item => item.audio === clip.audio);
 }
 
+let voiceDetailSelection = new Map();
+
+function voiceDetailSelectionKey(selection) {
+  return selection.kind === 'asset' ? `asset:${selection.assetId}` : `reference:${selection.audio}`;
+}
+
+function voiceDetailRowList() {
+  return [...$('voice-detail-rows').children, ...$('voice-detail-assets').children];
+}
+
+function setVoiceDetailSelected(row, selected) {
+  const state = voiceDetailRowState.get(row);
+  if (!state || !state.selection) return;
+  if (selected) {
+    voiceDetailSelection.set(state.key, {
+      key: state.key,
+      kind: state.selection.kind,
+      voiceId: voiceDetail.id,
+      assetId: state.selection.assetId || null,
+      audio: state.selection.audio || null,
+      row,
+      editor: state.editor,
+    });
+  } else {
+    voiceDetailSelection.delete(state.key);
+  }
+}
+
+function refreshVoiceDetailSelection() {
+  const rows = voiceDetailRowList();
+  let selected = 0;
+  for (const row of rows) {
+    const state = voiceDetailRowState.get(row);
+    if (!state) continue;
+    const checked = voiceDetailSelection.has(state.key);
+    state.checkbox.checked = checked;
+    if (checked) selected += 1;
+  }
+  const total = rows.length;
+  const selectAll = $('voice-detail-select-all');
+  selectAll.checked = total > 0 && selected === total;
+  selectAll.indeterminate = selected > 0 && selected < total;
+  selectAll.disabled = total === 0;
+  $('voice-detail-select-empty').disabled = total === 0;
+  $('voice-detail-clear-selection').disabled = selected === 0;
+  $('voice-detail-selection-count').textContent = `已选 ${selected} / 共 ${total} 条`;
+  updateVoiceDetailBatchButtons();
+}
+
+// Integration point for the later batch ASR module: kind + stable ids + live row/editor.
+function selectedVoiceDetailItems() {
+  return [...voiceDetailSelection.values()]
+    .filter(item => item.row.isConnected && item.voiceId === voiceDetail.id)
+    .map(item => ({
+      key: item.key,
+      kind: item.kind,
+      voiceId: item.voiceId,
+      assetId: item.assetId,
+      audio: item.audio,
+      row: item.row,
+      editor: item.editor,
+      text: item.editor.value,
+    }));
+}
+
+
 function voiceDetailRow(spec) {
   const row = document.createElement('tr');
   row.className = 'voice-detail-row';
 
   const number = document.createElement('td');
   number.className = 'voice-detail-number';
+  const numberBox = document.createElement('div');
+  numberBox.className = 'voice-detail-number-box';
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'voice-detail-check';
+  checkbox.setAttribute('aria-label', `选择 ${spec.filename}`);
+  const numberText = document.createElement('span');
+  numberText.className = 'voice-detail-number-text';
+  numberBox.append(checkbox, numberText);
+  number.append(numberBox);
 
   const audioCell = document.createElement('td');
   audioCell.className = 'voice-detail-audio-cell';
-  audioCell.append(voiceDetailPlayer(spec));
+  audioCell.append(voiceDetailPlayer({
+    ...spec,
+    onDelete: () => {
+      if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) {
+        status.textContent = '批量操作进行中，请稍候再删除。';
+        return;
+      }
+      spec.onDelete();
+    },
+  }));
 
   const typeCell = document.createElement('td');
   typeCell.className = 'voice-detail-type';
@@ -1798,14 +1971,18 @@ function voiceDetailRow(spec) {
     startTask: spec.identifyTask,
   });
 
-  save.onclick = async () => {
+  const saveRow = async ({ fromBatch = false } = {}) => {
+    if (!fromBatch && (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running)) {
+      status.textContent = '批量操作进行中，请稍候。';
+      return { status: 'error', error: '批量操作进行中' };
+    }
     if (identifier.isRunning()) {
       status.textContent = '正在识别，请稍候再保存。';
-      return;
+      return { status: 'error', error: '正在识别' };
     }
     if (spec.validate && !spec.validate(editor.value)) {
       status.textContent = '文字不能为空';
-      return;
+      return { status: 'invalid', error: '文字不能为空' };
     }
     const voiceId = voiceDetail.id, request = voiceDetail.request;
     save.disabled = true;
@@ -1814,23 +1991,37 @@ function voiceDetailRow(spec) {
     status.textContent = '保存中…';
     try {
       const saved = await spec.save(editor.value, voiceId);
-      if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+      if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) {
+        return { status: 'stale' };
+      }
       editor.value = saved.text ?? '';
       editor.defaultValue = editor.value;
       status.textContent = '已保存';
+      return { status: 'saved', text: editor.value };
     } catch (error) {
-      if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+      if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) {
+        return { status: 'stale' };
+      }
       status.textContent = `保存失败：${error.message}`;
+      return { status: 'error', error: error.message };
     } finally {
-      save.disabled = false;
+      const locked = voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running;
+      save.disabled = locked;
+      identify.disabled = locked;
       editor.disabled = false;
-      identify.disabled = false;
       if (!voiceDetailSaving()) setVoiceDetailNotice('');
     }
   };
 
+  save.onclick = () => { saveRow().catch(() => {}); };
+
   row.append(number, audioCell, typeCell, textCell, actionCell);
-  voiceDetailRowState.set(row, { editor, identifier });
+  const key = voiceDetailSelectionKey(spec.selection);
+  voiceDetailRowState.set(row, { editor, identifier, checkbox, key, selection: spec.selection, save, identify, saveRow, status });
+  checkbox.addEventListener('change', () => {
+    setVoiceDetailSelected(row, checkbox.checked);
+    refreshVoiceDetailSelection();
+  });
   return { row, editor, identifier };
 }
 
@@ -1865,15 +2056,7 @@ function requestAssetDelete(asset, built) {
     filename: asset.filename,
     row: built.row,
     audioUrl: asset.audio_url,
-    run: async () => {
-      await api(
-        `/api/voices/${encodeURIComponent(voiceDetail.id)}/clips/${encodeURIComponent(asset.id)}/delete`,
-        { method: 'POST', body: '{}' });
-      const position = voiceDetail.assets.findIndex(item => item.id === asset.id);
-      if (position !== -1) voiceDetail.assets.splice(position, 1);
-      built.row.remove();
-      renumberVoiceDetailRows();
-    },
+    run: () => deleteVoiceDetailAsset(asset, built),
   });
 }
 
@@ -1884,25 +2067,54 @@ function requestReferenceDelete(clip, built, voiceId) {
     filename: clip.audio || '语音音频',
     row: built.row,
     audioUrl: clip.audio_url,
-    run: async () => {
-      const index = referenceIndexFor(voiceId, clip);
-      if (index < 0) throw new Error('这条语音已删除，请返回音色库刷新');
-      const updated = await api(`/api/voices/${encodeURIComponent(voiceId)}/references/delete`, {
-        method: 'POST',
-        body: JSON.stringify({ reference_index: index, audio: clip.audio }),
-      });
-      const position = state.voices.findIndex(item => item.id === voiceId);
-      if (position !== -1) state.voices[position] = updated;
-      built.row.remove();
-      renumberVoiceDetailRows();
-    },
+    run: () => deleteVoiceDetailReference(clip, built, voiceId),
   });
+}
+
+async function deleteVoiceDetailAsset(asset, built) {
+  const released = releaseVoiceDetailAudio(asset.audio_url);
+  try {
+    await api(
+      `/api/voices/${encodeURIComponent(voiceDetail.id)}/clips/${encodeURIComponent(asset.id)}/delete`,
+      { method: 'POST', body: '{}' });
+    const position = voiceDetail.assets.findIndex(item => item.id === asset.id);
+    if (position !== -1) voiceDetail.assets.splice(position, 1);
+    voiceDetailSelection.delete(`asset:${asset.id}`);
+    built.row.remove();
+    renumberVoiceDetailRows();
+    restoreVoiceDetailAudio(released);
+  } catch (error) {
+    restoreVoiceDetailAudio(released);
+    throw error;
+  }
+}
+
+async function deleteVoiceDetailReference(clip, built, voiceId) {
+  const index = referenceIndexFor(voiceId, clip);
+  if (index < 0) throw new Error('这条语音已删除，请返回音色库刷新');
+  const released = releaseVoiceDetailAudio(clip.audio_url);
+  try {
+    const updated = await api(`/api/voices/${encodeURIComponent(voiceId)}/references/delete`, {
+      method: 'POST',
+      body: JSON.stringify({ reference_index: index, audio: clip.audio }),
+    });
+    const position = state.voices.findIndex(item => item.id === voiceId);
+    if (position !== -1) state.voices[position] = updated;
+    voiceDetailSelection.delete(`reference:${clip.audio}`);
+    built.row.remove();
+    renumberVoiceDetailRows();
+    restoreVoiceDetailAudio(released);
+  } catch (error) {
+    restoreVoiceDetailAudio(released);
+    throw error;
+  }
 }
 
 function voiceDetailAssetRow(asset) {
   const built = voiceDetailRow({
     tag: '素材',
     filename: asset.filename,
+    selection: { kind: 'asset', assetId: asset.id, audio: asset.audio_url },
     audioUrl: asset.audio_url,
     preload: 'metadata',
     text: asset.text || '',
@@ -1963,6 +2175,10 @@ async function uploadVoiceAsset(voiceId, file) {
 
 async function importVoiceFiles(files) {
   if (!voiceDetail.id || voiceDetail.importing) return;
+  if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) {
+    setVoiceDetailImportStatus('批量操作进行中，请先等待当前批次完成后导入。');
+    return;
+  }
   if (voiceDetailSaving()) {
     setVoiceDetailImportStatus('正在保存文字，请稍候再导入。');
     return;
@@ -2016,6 +2232,10 @@ async function importVoiceFiles(files) {
 }
 
 $('voice-detail-import').onclick = () => {
+  if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) {
+    setVoiceDetailImportStatus('批量操作进行中，请先等待当前批次完成后导入。');
+    return;
+  }
   if (voiceDetail.importing) return;
   const picker = $('voice-detail-import-input');
   picker.value = '';
@@ -2025,6 +2245,374 @@ $('voice-detail-import-input').onchange = () => {
   const files = [...$('voice-detail-import-input').files];
   if (files.length) importVoiceFiles(files);
 };
+
+$('voice-detail-select-all').onchange = event => {
+  const rows = voiceDetailRowList();
+  if (event.target.checked) {
+    for (const row of rows) setVoiceDetailSelected(row, true);
+  } else {
+    voiceDetailSelection.clear();
+  }
+  refreshVoiceDetailSelection();
+};
+$('voice-detail-select-empty').onclick = () => {
+  voiceDetailSelection.clear();
+  for (const row of voiceDetailRowList()) {
+    const state = voiceDetailRowState.get(row);
+    if (state && state.editor.value.trim() === '') setVoiceDetailSelected(row, true);
+  }
+  refreshVoiceDetailSelection();
+};
+$('voice-detail-clear-selection').onclick = () => {
+  voiceDetailSelection.clear();
+  refreshVoiceDetailSelection();
+};
+
+function setVoiceDetailBatchStatus(text) {
+  $('voice-detail-batch-status').textContent = text || '';
+}
+
+function updateVoiceDetailBatchButtons() {
+  const running = voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running;
+  const has = voiceDetailSelection.size > 0;
+  $('voice-detail-batch-identify').disabled = running || !has;
+  $('voice-detail-batch-adopt').disabled = running || !has;
+  $('voice-detail-batch-save').disabled = running || !has;
+  $('voice-detail-batch-delete').disabled = running || !has;
+  const stop = $('voice-detail-batch-stop');
+  stop.disabled = !voiceDetailBatch.running;
+  stop.textContent = voiceDetailBatch.running && voiceDetailBatch.stop ? '停止中，当前条完成后结束' : '停止后续';
+}
+
+function setVoiceDetailBatchLock(locked) {
+  const rows = voiceDetailRowList();
+  for (const row of rows) {
+    const state = voiceDetailRowState.get(row);
+    if (!state) continue;
+    if (state.checkbox) state.checkbox.disabled = locked;
+    if (state.save) state.save.disabled = locked;
+    if (state.identify) state.identify.disabled = locked;
+  }
+  $('voice-detail-import').disabled = locked;
+  $('voice-detail-select-all').disabled = locked || rows.length === 0;
+  $('voice-detail-select-empty').disabled = locked || rows.length === 0;
+  $('voice-detail-clear-selection').disabled = locked || voiceDetailSelection.size === 0;
+  updateVoiceDetailBatchButtons();
+}
+
+async function startVoiceDetailBatch(force) {
+  if (voiceDetailBatch.running) return;
+  if (voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) {
+    setVoiceDetailBatchStatus('正在批量保存或删除，请稍候。');
+    return;
+  }
+  const items = selectedVoiceDetailItems();
+  if (!items.length) return;
+  const busy = voiceDetailRowList().some(row => {
+    const state = voiceDetailRowState.get(row);
+    return state && (state.editor.disabled || state.identifier.isRunning());
+  });
+  if (busy) {
+    setVoiceDetailBatchStatus('正在保存或识别，请稍候再开始批量识别。');
+    return;
+  }
+  if (voiceDetail.importing) {
+    setVoiceDetailBatchStatus('正在导入音频，请稍候再开始批量识别。');
+    return;
+  }
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  const runId = ++voiceDetailBatch.runId;
+  voiceDetailBatch.running = true;
+  voiceDetailBatch.stop = false;
+  setVoiceDetailBatchLock(true);
+  setVoiceDetailBatchStatus(`正在识别 1/${items.length} · 成功0 · 失败0`);
+  let success = 0, failed = 0, processed = 0, halted = false;
+  const stale = () => voiceDetailBatch.runId !== runId;
+  const stopped = () => voiceDetailBatch.stop || stale();
+  const valid = item => item.row.isConnected && voiceDetail.id === voiceId
+    && voiceDetail.request === request && Boolean(voiceDetailRowState.get(item.row));
+  try {
+    for (let index = 0; index < items.length; index++) {
+      if (stopped()) break;
+      const item = items[index];
+      if (!valid(item)) break;
+      const state = voiceDetailRowState.get(item.row);
+      if (!state || !state.identifier) break;
+      setVoiceDetailBatchStatus(`正在识别 ${index + 1}/${items.length} · 成功${success} · 失败${failed}`);
+      const outcome = await state.identifier.run({ force, autoFill: true });
+      if (stale()) break;
+      if (outcome.status === 'complete') {
+        success += 1;
+        processed += 1;
+      } else if (outcome.status === 'skipped') {
+        failed += 1;
+        processed += 1;
+        if (outcome.reason === 'model_unavailable') {
+          halted = true;
+          break;
+        }
+      } else {
+        failed += 1;
+        processed += 1;
+      }
+    }
+  } finally {
+    if (voiceDetailBatch.runId === runId) {
+      voiceDetailBatch.running = false;
+      voiceDetailBatch.stop = false;
+      setVoiceDetailBatchLock(false);
+      const remaining = Math.max(0, items.length - processed);
+      const tail = halted ? '（识别模型不可用，已停止剩余）' : '';
+      if (voiceDetail.id === voiceId && voiceDetail.request === request) {
+        setVoiceDetailBatchStatus(
+          `批量识别结束 · 成功${success} · 失败${failed} · 未处理${remaining}${tail}`);
+      }
+    }
+  }
+}
+
+$('voice-detail-batch-identify').onclick = () => { startVoiceDetailBatch(true).catch(() => {}); };
+$('voice-detail-batch-stop').onclick = () => {
+  if (!voiceDetailBatch.running || voiceDetailBatch.stop) return;
+  voiceDetailBatch.stop = true;
+  updateVoiceDetailBatchButtons();
+};
+
+function setVoiceDetailSaveBatchStatus(text) {
+  $('voice-detail-save-batch-status').textContent = text || '';
+}
+
+async function startVoiceDetailSaveBatch() {
+  if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) return;
+  const items = selectedVoiceDetailItems();
+  if (!items.length) return;
+  if (voiceDetail.importing) {
+    setVoiceDetailSaveBatchStatus('正在导入音频，请稍候再保存。');
+    return;
+  }
+  const busy = voiceDetailRowList().some(row => {
+    const state = voiceDetailRowState.get(row);
+    return state && (state.editor.disabled || state.identifier.isRunning());
+  });
+  if (busy) {
+    setVoiceDetailSaveBatchStatus('正在识别或保存，请稍候再开始批量保存。');
+    return;
+  }
+  const pending = items.filter(item => item.editor.value !== item.editor.defaultValue);
+  let skipped = items.length - pending.length;
+  if (!pending.length) {
+    setVoiceDetailSaveBatchStatus('所选语音没有待保存的修改');
+    return;
+  }
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  const runId = ++voiceDetailSaveBatch.runId;
+  voiceDetailSaveBatch.running = true;
+  setVoiceDetailBatchLock(true);
+  setVoiceDetailSaveBatchStatus(`正在保存 1/${pending.length} · 成功0 · 失败0 · 跳过${skipped}`);
+  let success = 0, failed = 0;
+  const stale = () => voiceDetailSaveBatch.runId !== runId;
+  try {
+    for (let index = 0; index < pending.length; index++) {
+      if (stale()) break;
+      const item = pending[index];
+      if (!item.row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) break;
+      const state = voiceDetailRowState.get(item.row);
+      if (!state || !state.saveRow) break;
+      setVoiceDetailSaveBatchStatus(
+        `正在保存 ${index + 1}/${pending.length} · 成功${success} · 失败${failed} · 跳过${skipped}`);
+      if (state.editor.value === state.editor.defaultValue) {
+        skipped += 1;
+        continue;
+      }
+      const outcome = await state.saveRow({ fromBatch: true });
+      if (stale()) break;
+      if (outcome.status === 'saved') success += 1;
+      else if (outcome.status === 'stale') break;
+      else if (outcome.status === 'unchanged') skipped += 1;
+      else failed += 1;
+    }
+  } finally {
+    if (voiceDetailSaveBatch.runId === runId) {
+      voiceDetailSaveBatch.running = false;
+      setVoiceDetailBatchLock(false);
+      if (voiceDetail.id === voiceId && voiceDetail.request === request) {
+        setVoiceDetailSaveBatchStatus(
+          `保存结束 · 所选${items.length} · 成功${success} · 失败${failed} · 未变跳过${skipped}`);
+      }
+    }
+  }
+}
+
+$('voice-detail-batch-save').onclick = () => { startVoiceDetailSaveBatch().catch(() => {}); };
+
+function setVoiceDetailActionStatus(text) {
+  $('voice-detail-action-status').textContent = text || '';
+}
+
+let adoptConfirmResolve = null;
+
+function confirmAdoptOverwrite(count) {
+  const dialog = $('voice-detail-adopt-dialog');
+  if (dialog.open) return Promise.resolve(false);
+  $('voice-detail-adopt-description').textContent = `将替换 ${count} 条尚未保存的文字。`;
+  $('voice-detail-adopt-cancel').disabled = false;
+  $('voice-detail-adopt-confirm').disabled = false;
+  return new Promise(resolve => {
+    const finish = value => {
+      adoptConfirmResolve = null;
+      dialog.onclose = null;
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    adoptConfirmResolve = finish;
+    dialog.onclose = () => { if (adoptConfirmResolve) adoptConfirmResolve(false); };
+    $('voice-detail-adopt-cancel').onclick = () => finish(false);
+    $('voice-detail-adopt-confirm').onclick = () => finish(true);
+    dialog.showModal();
+    $('voice-detail-adopt-cancel').focus();
+  });
+}
+
+async function startVoiceDetailAdoptBatch() {
+  if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) {
+    setVoiceDetailActionStatus('正在批量识别/保存/删除，请稍候。');
+    return;
+  }
+  if (voiceDetail.importing) {
+    setVoiceDetailActionStatus('正在导入音频，请稍候。');
+    return;
+  }
+  const items = selectedVoiceDetailItems();
+  if (!items.length) return;
+  const busy = voiceDetailRowList().some(row => {
+    const state = voiceDetailRowState.get(row);
+    return state && (state.editor.disabled || state.identifier.isRunning());
+  });
+  if (busy) {
+    setVoiceDetailActionStatus('正在识别或保存，请稍候再采用候选。');
+    return;
+  }
+  const targets = items.filter(item => {
+    const state = voiceDetailRowState.get(item.row);
+    return Boolean(state && state.identifier.hasPendingCandidate());
+  });
+  if (!targets.length) {
+    setVoiceDetailActionStatus('所选语音没有可采用的识别候选');
+    return;
+  }
+  const dirty = targets.filter(item => {
+    const state = voiceDetailRowState.get(item.row);
+    return state && state.editor.value !== state.editor.defaultValue;
+  });
+  if (dirty.length && !(await confirmAdoptOverwrite(dirty.length))) return;
+  if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running
+    || voiceDetail.importing) return;
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  let adopted = 0;
+  for (const item of targets) {
+    if (voiceDetail.id !== voiceId || voiceDetail.request !== request || !item.row.isConnected) break;
+    const state = voiceDetailRowState.get(item.row);
+    if (!state || !state.identifier.hasPendingCandidate()) continue;
+    if (state.identifier.adoptCandidate()) adopted += 1;
+  }
+  setVoiceDetailActionStatus(`采用结束 · 采用${adopted} · 跳过${items.length - adopted}`);
+}
+
+$('voice-detail-batch-adopt').onclick = () => { startVoiceDetailAdoptBatch().catch(() => {}); };
+
+function describeBatchDelete(items) {
+  const nameOf = item => item.row.querySelector('.voice-detail-asset-name')?.textContent
+    || item.audio || '语音';
+  const names = items.map(nameOf);
+  const shown = names.slice(0, 3).join('、');
+  $('voice-detail-batch-delete-names').textContent = names.length > 3
+    ? `${shown} 等${names.length}条` : shown;
+  $('voice-detail-batch-delete-count').textContent = `已选择 ${items.length} 条语音。`;
+  const dirty = items.filter(item => {
+    const state = voiceDetailRowState.get(item.row);
+    return state && state.editor.value !== state.editor.defaultValue;
+  }).length;
+  const dirtyNode = $('voice-detail-batch-delete-dirty');
+  dirtyNode.hidden = dirty === 0;
+  dirtyNode.textContent = `其中 ${dirty} 条有未保存修改，也会丢失。`;
+  $('voice-detail-batch-delete-error').hidden = true;
+}
+
+function openVoiceDetailDeleteBatchDialog() {
+  if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) {
+    setVoiceDetailActionStatus('正在批量识别/保存/删除，请稍候。');
+    return;
+  }
+  if (voiceDetail.importing) {
+    setVoiceDetailActionStatus('正在导入音频，请稍候。');
+    return;
+  }
+  const busy = voiceDetailRowList().some(row => {
+    const state = voiceDetailRowState.get(row);
+    return state && (state.editor.disabled || state.identifier.isRunning());
+  });
+  if (busy) {
+    setVoiceDetailActionStatus('正在识别或保存，请稍候再删除。');
+    return;
+  }
+  const items = selectedVoiceDetailItems();
+  if (!items.length) return;
+  const dialog = $('voice-detail-batch-delete-dialog');
+  if (dialog.open) return;
+  describeBatchDelete(items);
+  dialog.showModal();
+  $('voice-detail-batch-delete-cancel').focus();
+}
+
+async function startVoiceDetailDeleteBatch() {
+  const dialog = $('voice-detail-batch-delete-dialog');
+  if (voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running) return;
+  const items = selectedVoiceDetailItems();
+  if (!items.length) { if (dialog.open) dialog.close(); return; }
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  const runId = ++voiceDetailDeleteBatch.runId;
+  voiceDetailDeleteBatch.running = true;
+  setVoiceDetailBatchLock(true);
+  if (dialog.open) dialog.close();
+  setVoiceDetailActionStatus(`正在删除 1/${items.length} · 成功0 · 失败0`);
+  let success = 0, failed = 0;
+  const stale = () => voiceDetailDeleteBatch.runId !== runId;
+  try {
+    for (let index = 0; index < items.length; index++) {
+      if (stale()) break;
+      const item = items[index];
+      if (voiceDetail.id !== voiceId || voiceDetail.request !== request) break;
+      if (!item.row.isConnected) continue;
+      setVoiceDetailActionStatus(`正在删除 ${index + 1}/${items.length} · 成功${success} · 失败${failed}`);
+      try {
+        if (item.kind === 'asset') {
+          await deleteVoiceDetailAsset({ id: item.assetId, audio_url: item.audio }, { row: item.row });
+        } else {
+          await deleteVoiceDetailReference({ audio: item.audio, audio_url: item.audio }, { row: item.row }, voiceId);
+        }
+        success += 1;
+      } catch (error) {
+        failed += 1;
+        const state = voiceDetailRowState.get(item.row);
+        if (state?.status) state.status.textContent = `删除失败：${error.message}`;
+      }
+    }
+  } finally {
+    if (voiceDetailDeleteBatch.runId === runId) {
+      voiceDetailDeleteBatch.running = false;
+      setVoiceDetailBatchLock(false);
+      if (voiceDetail.id === voiceId && voiceDetail.request === request) {
+        setVoiceDetailActionStatus(
+          `删除结束 · 成功${success} · 失败${failed}${failed ? '（失败原因见对应行）' : ''}`);
+      }
+    }
+  }
+}
+
+$('voice-detail-batch-delete').onclick = () => { openVoiceDetailDeleteBatchDialog(); };
+$('voice-detail-batch-delete-confirm').onclick = () => { startVoiceDetailDeleteBatch().catch(() => {}); };
+$('voice-detail-batch-delete-cancel').onclick = () => $('voice-detail-batch-delete-dialog').close();
+$('voice-detail-batch-delete-close').onclick = () => $('voice-detail-batch-delete-dialog').close();
 
 $('voice-asset-delete-dialog').oncancel = event => {
   if (voiceDeleteBusy) event.preventDefault();
@@ -2061,14 +2649,11 @@ $('voice-asset-delete-confirm').onclick = async () => {
   voiceDeleteBusy = true;
   confirm.disabled = cancel.disabled = close.disabled = true;
   error.hidden = true;
-  const released = releaseVoiceDetailAudio(context.audioUrl);
   try {
     await context.run();
     voiceDeleteBusy = false;
     dialog.close();
-    restoreVoiceDetailAudio(released);
   } catch (failure) {
-    restoreVoiceDetailAudio(released);
     error.textContent = `删除失败：${failure.message}`;
     error.hidden = false;
     voiceDeleteBusy = false;
@@ -2089,6 +2674,17 @@ function openVoiceDetail(voiceId) {
   voiceDetail.request += 1;
   voiceDetail.assets = [];
   voiceDetail.importing = false;
+  voiceDetailSelection.clear();
+  voiceDetailBatch.runId += 1;
+  voiceDetailBatch.running = false;
+  voiceDetailBatch.stop = false;
+  voiceDetailSaveBatch.runId += 1;
+  voiceDetailSaveBatch.running = false;
+  voiceDetailDeleteBatch.runId += 1;
+  voiceDetailDeleteBatch.running = false;
+  setVoiceDetailBatchStatus('');
+  setVoiceDetailSaveBatchStatus('');
+  setVoiceDetailActionStatus('');
   setVoiceDetailImportStatus('');
   $('voice-detail-import').disabled = false;
   const detail = $('voice-detail');
@@ -2106,6 +2702,7 @@ function openVoiceDetail(voiceId) {
     const built = voiceDetailRow({
       tag: '参考',
       filename: clip.audio || `语音 ${index + 1}`,
+      selection: { kind: 'reference', audio: clip.audio },
       audioUrl: clip.audio_url,
       preload: 'metadata',
       text: clip.transcript || '',

@@ -254,6 +254,20 @@
             <input id="voice-detail-import-input" type="file" accept=".wav,.flac,.mp3,.ogg,.m4a,audio/wav,audio/flac,audio/mpeg,audio/ogg,audio/mp4" multiple hidden>
           </div>
           <p id="voice-detail-import-status" class="voice-detail-import-status" role="status" hidden></p>
+          <div class="voice-detail-batch">
+            <label class="voice-detail-select-all"><input id="voice-detail-select-all" type="checkbox" aria-label="全选当前角色的语音" disabled>全选</label>
+            <button id="voice-detail-select-empty" class="secondary-btn" type="button" disabled>选择未标注语音</button>
+            <button id="voice-detail-clear-selection" class="text-btn" type="button" disabled>清空选择</button>
+            <span id="voice-detail-selection-count" class="voice-detail-selection-count" role="status">已选 0 / 共 0 条</span>
+            <button id="voice-detail-batch-identify" class="secondary-btn" type="button" disabled>批量识别</button>
+            <button id="voice-detail-batch-adopt" class="secondary-btn" type="button" disabled>采用所选候选</button>
+            <button id="voice-detail-batch-save" class="primary-btn" type="button" disabled>保存所选修改</button>
+            <button id="voice-detail-batch-delete" class="secondary-btn" type="button" disabled>删除所选</button>
+            <button id="voice-detail-batch-stop" class="text-btn" type="button" disabled>停止后续</button>
+            <span id="voice-detail-batch-status" class="voice-detail-batch-status" role="status"></span>
+            <span id="voice-detail-save-batch-status" class="voice-detail-batch-status voice-detail-save-batch-status" role="status"></span>
+            <span id="voice-detail-action-status" class="voice-detail-batch-status" role="status"></span>
+          </div>
 
           <table class="voice-detail-table">
             <thead>
@@ -451,6 +465,31 @@
     <div class="studio-dialog-footer">
       <button id="voice-asset-delete-confirm" class="secondary-btn voice-asset-delete-danger" type="button">确认删除</button>
       <button id="voice-asset-delete-cancel" class="primary-btn" type="button" autofocus>取消</button>
+    </div>
+  </dialog>
+  <dialog id="voice-detail-adopt-dialog" class="studio-dialog voice-detail-adopt-dialog" aria-labelledby="voice-detail-adopt-title" aria-describedby="voice-detail-adopt-description">
+    <div class="studio-dialog-heading"><h2 id="voice-detail-adopt-title">替换未保存文字？</h2></div>
+    <div class="studio-dialog-body">
+      <p id="voice-detail-adopt-description"></p>
+      <p>采用后将用识别结果覆盖这些编辑框内容，且不会自动保存。</p>
+    </div>
+    <div class="studio-dialog-footer">
+      <button id="voice-detail-adopt-confirm" class="secondary-btn voice-asset-delete-danger" type="button">替换并采用</button>
+      <button id="voice-detail-adopt-cancel" class="primary-btn" type="button" autofocus>取消</button>
+    </div>
+  </dialog>
+  <dialog id="voice-detail-batch-delete-dialog" class="studio-dialog voice-detail-batch-delete-dialog" aria-labelledby="voice-detail-batch-delete-title" aria-describedby="voice-detail-batch-delete-description">
+    <div class="studio-dialog-heading"><h2 id="voice-detail-batch-delete-title">删除所选语音？</h2><button id="voice-detail-batch-delete-close" type="button" class="icon-btn" title="取消" aria-label="取消"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <div class="studio-dialog-body">
+      <p id="voice-detail-batch-delete-count" class="voice-asset-delete-name"></p>
+      <p id="voice-detail-batch-delete-names" class="voice-detail-batch-delete-names"></p>
+      <p id="voice-detail-batch-delete-dirty" class="voice-asset-delete-dirty" hidden></p>
+      <p id="voice-detail-batch-delete-description">将删除库内这些音频和标注，无法撤销；不会影响外部原文件或其他角色。</p>
+      <p id="voice-detail-batch-delete-error" class="voice-asset-delete-error" role="alert" hidden></p>
+    </div>
+    <div class="studio-dialog-footer">
+      <button id="voice-detail-batch-delete-confirm" class="secondary-btn voice-asset-delete-danger" type="button">确认删除</button>
+      <button id="voice-detail-batch-delete-cancel" class="primary-btn" type="button" autofocus>取消</button>
     </div>
   </dialog>
   <script src="/assets/i18n.js"></script>

@@ -986,6 +986,18 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   background: #fff;
 }
 
+.voice-detail-adopt-dialog,
+.voice-detail-batch-delete-dialog {
+  background: #fff;
+}
+
+.voice-detail-batch-delete-names {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .voice-asset-delete-name {
   margin: 0 0 8px;
   font-weight: 500;
@@ -1004,13 +1016,13 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   font-size: 13px;
 }
 
-.voice-asset-delete-dialog .voice-asset-delete-danger {
+.studio-dialog .voice-asset-delete-danger {
   border-color: var(--accent);
   background: #fff;
   color: var(--accent);
 }
 
-.voice-asset-delete-dialog .voice-asset-delete-danger:hover:enabled {
+.studio-dialog .voice-asset-delete-danger:hover:enabled {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent);
@@ -1022,7 +1034,7 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
 }
 
 #voice-detail .voice-detail-table th:first-child {
-  width: 44px;
+  width: 64px;
 }
 
 #voice-detail .voice-detail-table th:nth-child(2) {
@@ -1044,6 +1056,85 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
 #voice-detail .voice-detail-table .voice-detail-number {
   color: var(--muted);
   text-align: center;
+}
+
+#voice-detail .voice-detail-number-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#voice-detail .voice-detail-check {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+#voice-detail .voice-detail-number-text {
+  white-space: nowrap;
+}
+
+/* 语音详情：批量选择工具条（本模块新增） */
+.voice-detail-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: -12px 0 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.voice-detail-batch .voice-detail-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.voice-detail-batch input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.voice-detail-batch .secondary-btn {
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.voice-detail-batch .primary-btn {
+  min-height: 30px;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.voice-detail-batch .text-btn {
+  font-size: 13px;
+}
+
+.voice-detail-selection-count {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.voice-detail-batch-status {
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.voice-detail-batch-status:empty {
+  display: none;
 }
 
 #voice-detail .voice-detail-type-cell {
