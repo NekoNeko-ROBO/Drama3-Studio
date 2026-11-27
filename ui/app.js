@@ -1315,6 +1315,62 @@ function previewVoice(voice, button) {
     } else addEvent({ stage: 'error', message: t('Unable to play this audio.') });
   });
 }
+function closeVoiceDetail() {
+  stopVoicePreview();
+  $('voice-detail').querySelectorAll('audio').forEach(audio => audio.pause());
+  $('voice-detail').hidden = true;
+  $('voice-list').hidden = false;
+  document.querySelector('#view-voices .voice-library-toolbar').hidden = false;
+  filterVoices();
+}
+
+function openVoiceDetail(voiceId) {
+  const voice = voiceById(voiceId);
+  if (!voice) return;
+
+  stopVoicePreview();
+  const detail = $('voice-detail');
+  detail.querySelectorAll('audio').forEach(audio => audio.pause());
+
+  const clips = voice.references?.length ? voice.references : [voice];
+  $('voice-detail-name').textContent = voice.name;
+  $('voice-detail-count').textContent = `${clips.length} 条语音`;
+
+  const rows = $('voice-detail-rows');
+  rows.replaceChildren();
+
+  clips.forEach((clip, index) => {
+    const row = document.createElement('tr');
+
+    const number = document.createElement('td');
+    number.textContent = index + 1;
+
+    const audioCell = document.createElement('td');
+    const audio = document.createElement('audio');
+    audio.controls = true;
+    audio.preload = 'none';
+    audio.src = clip.audio_url;
+    audio.addEventListener('play', () => {
+      stopVoicePreview();
+      document.querySelectorAll('audio').forEach(other => {
+        if (other !== audio) other.pause();
+      });
+    });
+    audioCell.append(audio);
+
+    const text = document.createElement('td');
+    text.textContent = clip.transcript || '';
+
+    row.append(number, audioCell, text);
+    rows.append(row);
+  });
+
+  $('voice-detail-back').onclick = closeVoiceDetail;
+  $('voice-list').hidden = true;
+  $('voice-search-empty').hidden = true;
+  document.querySelector('#view-voices .voice-library-toolbar').hidden = true;
+  detail.hidden = false;
+}
 function renderVoices() {
   stopVoicePreview();
   const moreClips = voice => (voice.references?.length || 1) < 2 ? '' : (
@@ -1355,6 +1411,12 @@ function renderVoices() {
     const id = card.dataset.voiceId;
     const name = card.querySelector('strong').textContent;
     card.dataset.cleanupId = id;
+    const manage = document.createElement('button');
+    manage.type = 'button';
+    manage.className = 'text-btn';
+    manage.textContent = '管理语音';
+    manage.onclick = () => openVoiceDetail(id);
+    card.querySelector('.voice-card-actions').prepend(manage);
     const checkbox = StudioCleanup.checkbox('voices', id);
     checkbox.setAttribute('aria-label', t('Select voice {name}', { name }));
     delete checkbox.dataset.i18nAriaLabel;

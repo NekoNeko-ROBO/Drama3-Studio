@@ -241,6 +241,27 @@
         <p id="voices-cleanup-note" class="cleanup-note" role="status" hidden></p>
         <div id="voice-list" class="voice-list"></div>
         <div id="voice-search-empty" hidden></div>
+        
+        <div id="voice-detail" hidden>
+          <div class="voice-detail-toolbar">
+            <button id="voice-detail-back" class="secondary-btn" type="button">
+              返回音色库
+            </button>
+            <h2 id="voice-detail-name"></h2>
+            <span id="voice-detail-count" class="badge">0</span>
+          </div>
+
+          <table class="voice-detail-table">
+            <thead>
+              <tr>
+                <th scope="col">序号</th>
+                <th scope="col">音频</th>
+                <th scope="col">对应文字</th>
+              </tr>
+            </thead>
+            <tbody id="voice-detail-rows"></tbody>
+          </table>
+        </div>
       </section>
       <section class="view" id="view-takes">
         <div class="panel history-panel">

@@ -794,3 +794,51 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   html { scroll-behavior: auto; }
   button, a, .input, .compact-input, .editor-area, .dialogue-speaker, .compact-studio .voice-card { transition: none; }
 }
+/* 角色语音详情 */
+#voice-detail {
+  overflow-x: auto;
+}
+
+#voice-detail .voice-detail-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+#voice-detail-name {
+  margin: 0;
+}
+
+#voice-detail .voice-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#voice-detail .voice-detail-table th,
+#voice-detail .voice-detail-table td {
+  padding: 12px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid currentColor;
+}
+
+#voice-detail .voice-detail-table th:first-child {
+  width: 64px;
+}
+
+#voice-detail .voice-detail-table th:nth-child(2) {
+  width: 300px;
+}
+
+#voice-detail .voice-detail-table audio {
+  display: block;
+  width: 280px;
+}
+
+#voice-detail .voice-detail-table td:last-child {
+  min-width: 200px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
