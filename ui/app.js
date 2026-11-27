@@ -971,6 +971,7 @@ function clearCloneAudio(resetInput = true) {
 function showMissingClone(upload, transcript) {
   clearCloneAudio();
   state.cloneUpload = upload; state.cloneMissing = true; state.selectedVoiceIds.clear();
+  window.StudioFlow?.clearReferenceSelection?.();
   $('clone-file-name').textContent = upload.filename || upload.id;
   $('clone-transcript').value = transcript || '';
   $('clone-upload-preview').classList.remove('hidden'); $('clone-upload-zone').classList.add('hidden');
@@ -998,6 +999,7 @@ function selectCloneAudio(file, { auto = true, upload = null, original = null } 
   state.cloneOriginal = original;
   state.clonePreviewUrl = URL.createObjectURL(file);
   state.selectedVoiceIds.clear();
+  window.StudioFlow?.clearReferenceSelection?.();
   $('clone-file-name').textContent = file.name;
   $('clone-file-audio').src = state.clonePreviewUrl;
   $('clone-upload-preview').classList.remove('hidden');
@@ -1239,12 +1241,16 @@ function updateVoiceSelection() {
   window.StudioFlow?.voicesChanged();
 }
 $('default-voice').onclick = () => {
-  state.selectedVoiceIds.clear(); clearCloneAudio(); cancelReferencePrewarm();
+  state.selectedVoiceIds.clear(); window.StudioFlow?.clearReferenceSelection?.();
+  clearCloneAudio(); cancelReferencePrewarm();
 };
 for (const event of ['input', 'change']) {
   $('clone-audio').addEventListener(event, syncCloneAudioSelection);
 }
-$('remove-clone-audio').onclick = () => { clearCloneAudio(); cancelReferencePrewarm(); };
+$('remove-clone-audio').onclick = () => {
+  window.StudioFlow?.clearReferenceSelection?.();
+  clearCloneAudio(); cancelReferencePrewarm();
+};
 $('replace-clone-audio').onclick = () => $('clone-audio').click();
 $('transcribe-clone').onclick = () => transcribeClone(true);
 $('clone-transcript').addEventListener('input', () => {
@@ -2849,6 +2855,7 @@ async function deleteVoiceDetailAsset(asset, built) {
     built.row.remove();
     renumberVoiceDetailRows();
     applyVoiceDetailFilter();
+    syncVoiceEntryCount();
     restoreVoiceDetailAudio(released);
   } catch (error) {
     restoreVoiceDetailAudio(released);
@@ -2874,6 +2881,7 @@ async function deleteVoiceDetailReference(clip, built, voiceId) {
     built.row.remove();
     renumberVoiceDetailRows();
     applyVoiceDetailFilter();
+    syncVoiceEntryCount();
     restoreVoiceDetailAudio(released);
   } catch (error) {
     restoreVoiceDetailAudio(released);
@@ -2907,10 +2915,18 @@ function voiceDetailAssetRow(asset) {
   return built;
 }
 
+function syncVoiceEntryCount() {
+  const voice = voiceById(voiceDetail.id);
+  if (!voice) return;
+  voice.entry_count = (voice.references?.length ?? 0) + voiceDetail.assets.length;
+  window.StudioFlow?.refreshVoiceLabels?.();
+}
+
 function appendVoiceDetailAssetRow(asset) {
   $('voice-detail-assets').append(voiceDetailAssetRow(asset).row);
   renumberVoiceDetailRows();
   applyVoiceDetailFilter();
+  syncVoiceEntryCount();
 }
 
 function renderVoiceDetailAssets() {
@@ -2919,6 +2935,7 @@ function renderVoiceDetailAssets() {
   voiceDetail.assets.forEach(asset => rows.append(voiceDetailAssetRow(asset).row));
   renumberVoiceDetailRows();
   applyVoiceDetailFilter();
+  syncVoiceEntryCount();
 }
 
 async function loadVoiceDetailAssets() {
@@ -3561,7 +3578,7 @@ function renderVoices() {
     )).join('')}</details>`
   );
   const markup = state.voices.length ? state.voices.map(voice => (
-    `<div class="voice-choice"><button class="voice-pick ${state.selectedVoiceIds.has(voice.id) ? 'selected' : ''}" data-voice="${escapeHtml(voice.id)}" aria-pressed="${state.selectedVoiceIds.has(voice.id)}"><span class="voice-pick-icon">${icon('mic')}</span><span class="voice-pick-copy"><b>${escapeHtml(voice.name)}</b><small>${translated('{count} reference clips', { count: voice.references?.length ?? 1 })}</small></span><span class="voice-pick-check">${icon('check')}</span></button><button class="voice-preview" type="button" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div>`
+    `<div class="voice-choice"><button class="voice-pick ${state.selectedVoiceIds.has(voice.id) ? 'selected' : ''}" data-voice="${escapeHtml(voice.id)}" aria-pressed="${state.selectedVoiceIds.has(voice.id)}"><span class="voice-pick-icon">${icon('mic')}</span><span class="voice-pick-copy"><b>${escapeHtml(voice.name)}</b><small>${escapeHtml(voiceEntryLabel(voice))}</small></span><span class="voice-pick-check">${icon('check')}</span></button><button class="voice-preview" type="button" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div>`
   )).join('') : `<span class="muted">${translated('No saved voices yet')}</span>`;
   for (const id of ['voice-picks']) {
     const container = $(id);
@@ -3586,7 +3603,7 @@ function renderVoices() {
   $('voice-hint').innerHTML = state.voices.length
     ? translated('{count} saved references', { count: state.voices.length }) : translated('No saved voices yet');
   $('voice-list').innerHTML = state.voices.length ? state.voices.map(voice => (
-    `<div class="voice-card" data-voice-id="${escapeHtml(voice.id)}" data-filter="${escapeHtml(`${voice.name} ${(voice.references || [voice]).map(clip => clip.transcript).join(' ')}`.toLocaleLowerCase())}"><div class="voice-card-head"><div class="voice-card-copy"><strong title="${escapeHtml(voice.name)}">${escapeHtml(voice.name)}</strong>${(voice.references?.length ?? 1) < 2 ? `<small>${translated('{count} reference clips', { count: 1 })}</small>` : ''}</div><button type="button" class="icon-btn voice-tile-preview" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div><p class="voice-transcript" title="${escapeHtml(voice.transcript || '')}">${escapeHtml(voice.transcript || '')}</p>${moreClips(voice)}<div class="voice-card-actions"><button type="button" class="text-btn use-voice" data-id="${escapeHtml(voice.id)}">${translated('Use this voice')}${icon('arrow')}</button>${voice.audio_url ? `<a class="voice-download" download href="${escapeHtml(voice.audio_url)}" data-i18n-title="Download" title="${escapeHtml(t('Download'))}" data-i18n-aria-label="Download" aria-label="${escapeHtml(t('Download'))}">${icon('download')}</a>` : ''}</div></div>`
+    `<div class="voice-card" data-voice-id="${escapeHtml(voice.id)}" data-filter="${escapeHtml(`${voice.name} ${(voice.references || [voice]).map(clip => clip.transcript).join(' ')}`.toLocaleLowerCase())}"><div class="voice-card-head"><div class="voice-card-copy"><strong title="${escapeHtml(voice.name)}">${escapeHtml(voice.name)}</strong><small>${translated('{count} audio entries', { count: voiceEntryCount(voice) })}</small></div><button type="button" class="icon-btn voice-tile-preview" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div><p class="voice-transcript" title="${escapeHtml(voice.transcript || '')}">${escapeHtml(voice.transcript || '')}</p>${moreClips(voice)}<div class="voice-card-actions"><button type="button" class="text-btn use-voice" data-id="${escapeHtml(voice.id)}">${translated('Use this voice')}${icon('arrow')}</button>${voice.audio_url ? `<a class="voice-download" download href="${escapeHtml(voice.audio_url)}" data-i18n-title="Download" title="${escapeHtml(t('Download'))}" data-i18n-aria-label="Download" aria-label="${escapeHtml(t('Download'))}">${icon('download')}</a>` : ''}</div></div>`
   )).join('') : emptyState('mic', 'No voices saved');
   $('voice-count').textContent = state.voices.length;
   for (const card of $('voice-list').querySelectorAll('.voice-card')) {
@@ -3649,6 +3666,13 @@ function filterVoices() {
 }
 $('voice-search').addEventListener('input', filterVoices);
 const voiceById = id => state.voices.find(voice => voice.id === id) || state.retainedVoices.get(id);
+const voiceEntryCount = voice => Number.isFinite(voice?.entry_count)
+  ? voice.entry_count : (voice?.references?.length ?? (voice?.audio_url ? 1 : 0));
+const voiceEntryLabel = voice => {
+  const total = translated('{count} audio entries', { count: voiceEntryCount(voice) });
+  const selected = window.StudioFlow?.creationSelectionCount?.(voice.id);
+  return selected == null ? total : `${total} · ${translated('{count} selected', { count: selected })}`;
+};
 let voiceRequest = 0;
 async function loadVoices(deletion = null) {
   const request = ++voiceRequest;

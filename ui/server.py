@@ -2499,16 +2499,78 @@ class AppState:
             _write_voice_tag_assignments(folder, assignments)
         return {"key": key, "tag_ids": clean}
 
+    def _entry_metadata(self, path: Path):
+        size = None
+        try:
+            size = path.stat().st_size
+        except OSError:
+            pass
+        duration = None
+        try:
+            import soundfile as sf
+            info = sf.info(str(path))
+            if info.samplerate > 0 and info.frames >= 0:
+                duration = info.frames / info.samplerate
+        except Exception:
+            pass
+        return size, duration
+
+    def voice_reference_entries(self, voice_id: str) -> dict:
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        entries = []
+        with self._reference_assets_lock:
+            voice = self._voice(voice_id)
+            for item in voice["references"]:
+                audio = _inside(folder / item["audio"], folder)
+                if not audio.is_file():
+                    continue
+                size, duration = self._entry_metadata(audio)
+                entries.append({
+                    "kind": "reference", "key": f"reference:{item['audio']}",
+                    "filename": item["audio"], "text": str(item.get("transcript") or ""),
+                    "audio_url": item.get("audio_url") or self._audio_url(audio),
+                    "bytes": size, "duration": duration,
+                })
+            for item in _read_voice_dataset(folder):
+                audio = _inside(folder / item["audio"], folder)
+                if not audio.is_file():
+                    continue
+                size, duration = self._entry_metadata(audio)
+                entries.append({
+                    "kind": "asset", "key": f"asset:{item['id']}",
+                    "filename": item.get("filename") or "clip", "text": item.get("text") or "",
+                    "audio_url": self._audio_url(audio),
+                    "bytes": size, "duration": duration,
+                })
+        with self._voice_tags_lock:
+            tags = _read_voice_tags(self.data_root)
+            assignments = _read_voice_tag_assignments(folder)
+        known = {tag["id"] for tag in tags}
+        for entry in entries:
+            entry["tag_ids"] = [tag_id for tag_id in assignments.get(entry["key"], [])
+                                if tag_id in known]
+        return {"voice_id": voice_id, "voice_name": voice.get("name") or voice_id,
+                "entries": entries, "tags": tags}
+
     def list_voices(self, *, retained=False):
         result = []
         removed = self.studio.removed("voices")
-        for path in sorted(self.voices_root.iterdir()):
-            if (path.name in removed) != retained or not path.is_dir() or not (path / "voice.json").is_file():
-                continue
-            try:
-                result.append(self._voice(path.name))
-            except (OSError, ValueError, KeyError):
-                continue
+        with self._reference_assets_lock:
+            for path in sorted(self.voices_root.iterdir()):
+                if (path.name in removed) != retained or not path.is_dir() or not (path / "voice.json").is_file():
+                    continue
+                try:
+                    voice = self._voice(path.name)
+                    voice["entry_count"] = len(voice["references"])
+                    try:
+                        voice["entry_count"] += len(_read_voice_dataset(path))
+                    except (OSError, ValueError, KeyError):
+                        pass
+                    result.append(voice)
+                except (OSError, ValueError, KeyError):
+                    continue
         return result
 
     def add_voice(self, name: str, transcript: str, speaker: int, filename: str, data: bytes):
@@ -3602,6 +3664,9 @@ class Handler(BaseHTTPRequestHandler):
             voice_tags = re.fullmatch(r"/api/voices/([^/]+)/tags", path)
             if voice_tags:
                 return self._json(200, STATE.voice_tag_state(voice_tags.group(1)))
+            voice_entries = re.fullmatch(r"/api/voices/([^/]+)/reference-entries", path)
+            if voice_entries:
+                return self._json(200, STATE.voice_reference_entries(voice_entries.group(1)))
             if path.startswith("/api/voices/") and path.endswith("/clips"):
                 return self._json(200, STATE.voice_dataset(
                     path.removeprefix("/api/voices/").removesuffix("/clips")))

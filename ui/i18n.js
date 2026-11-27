@@ -871,6 +871,7 @@
     ['Exit selection', '退出选择', '選択を終了', '선택 종료'],
     ['Select all shown', '全选当前显示', '表示項目をすべて選択', '현재 표시 항목 모두 선택'],
     ['{count} selected', '已选择 {count} 项', '{count} 件選択中', '{count}개 선택'],
+    ['Hidden selected', '隐藏已选', '非表示の選択', '숨김 선택'],
     ['Delete selected', '删除所选项', '選択した項目を削除', '선택 항목 삭제'],
     ['Delete', '删除', '削除', '삭제'],
     ['Deleting…', '正在删除…', '削除中…', '삭제 중…'],
@@ -889,6 +890,20 @@
     ['Filter history', '筛选历史记录', '履歴を絞り込む', '기록 필터'],
     ['Unfinished results', '未完成结果', '未完了の結果', '미완료 결과'],
     ['No unfinished results', '没有未完成结果', '未完了の結果はありません', '미완료 결과가 없습니다'],
+    ['{count} audio entries', '{count} 条音频', '{count}件の音声', '{count}개 오디오'],
+    ['Choose voice', '选择音色', '音声を選択', '음성 선택'],
+    ['Search filename or text…', '搜索文件名或文字…', 'ファイル名またはテキストを検索…', '파일명 또는 텍스트 검색…'],
+    ['Filter by tags', '标签筛选', 'タグで絞り込み', '태그 필터'],
+    ['Back to voices', '返回音色', '音声に戻る', '음성으로 돌아가기'],
+    ['Select all', '全选', 'すべて選択', '전체 선택'],
+    ['Clear filters', '清除筛选', 'フィルターを解除', '필터 지우기'],
+    ['No tags', '无标签', 'タグなし', '태그 없음'],
+    ['No matching audio', '没有匹配的音频', '一致する音声はありません', '일치하는 오디오가 없습니다'],
+    ['No audio entries', '该音色暂无音频条目', 'この音声には音声項目がありません', '이 음성에는 오디오 항목이 없습니다'],
+    ['Use selected entries', '使用所选音频', '選択した音声を使用', '선택한 오디오 사용'],
+    ['{count} matching', '匹配 {count} 条', '{count}件一致', '{count}개 일치'],
+    ['No transcript', '无文字', '書き起こしなし', '텍스트 없음'],
+    ['Loading audio…', '正在读取音频…', '音声を読み込み中…', '오디오 불러오는 중…'],
   ];
   const locales = ['zh-CN', 'en', 'ja', 'ko'];
   const index = { en: 0, 'zh-CN': 1, ja: 2, ko: 3 };

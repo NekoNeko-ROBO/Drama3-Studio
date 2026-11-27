@@ -1734,3 +1734,265 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   padding: 4px 12px;
   font-size: 13px;
 }
+
+.reference-picker-dialog {
+  width: min(720px, calc(100% - 28px));
+  height: min(70vh, 680px);
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+}
+.reference-picker-dialog[open] { display: flex; flex-direction: column; }
+.reference-picker-dialog .studio-dialog-heading { flex: 0 0 auto; padding: 14px 18px; }
+.reference-picker-dialog .studio-dialog-heading h2 { font-size: 16px; }
+.reference-picker-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.reference-picker-top {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-deep);
+}
+.reference-picker-back-row, .reference-picker-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.reference-picker-back { flex: 0 0 auto; padding: 2px 4px; }
+.reference-picker-voice-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+.reference-picker-filters { flex-wrap: wrap; }
+.reference-picker-filters .input {
+  flex: 1 1 190px;
+  min-width: 120px;
+  min-height: 32px;
+  margin: 0;
+}
+.reference-picker-tag-filter { position: relative; flex: 0 0 auto; }
+.reference-picker-tag-filter > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.reference-picker-tag-filter > summary::-webkit-details-marker { display: none; }
+.reference-picker-tag-list {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 210px;
+  max-height: 230px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--panel);
+  box-shadow: 0 10px 28px #17202e1f;
+}
+.reference-picker-tag-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  color: var(--text);
+  font-size: 12px;
+}
+.reference-picker-tag-option input { accent-color: #d9633c; }
+.reference-picker-select-all {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.reference-picker-select-all input { accent-color: #d9633c; }
+.reference-picker-voice-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px 16px;
+}
+.reference-picker-voice {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.reference-picker-voice:hover { border-color: #e4a08a; background: var(--hover); }
+.reference-picker-voice strong { font-size: 14px; }
+.reference-picker-voice-meta { color: var(--muted); font-size: 12px; }
+.reference-picker-entry-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.reference-picker-message { margin: 0; padding: 10px 16px; }
+.reference-picker-notice {
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid #f0c6b8;
+  background: #fff5ef;
+  color: #a43c24;
+}
+.reference-picker-entry-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 10px 12px;
+}
+.reference-picker-entry {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 9px 6px;
+  border-bottom: 1px solid var(--line);
+}
+.reference-picker-entry:hover { background: var(--hover); }
+.reference-picker-check { padding-top: 1px; }
+.reference-picker-check input { width: 17px; height: 17px; accent-color: #d9633c; }
+.reference-picker-entry-content { min-width: 0; }
+.reference-picker-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.reference-picker-filename {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.reference-picker-entry-tags { display: flex; flex-wrap: wrap; gap: 3px; }
+.reference-picker-tag {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.reference-picker-duration {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.reference-picker-summary {
+  display: block;
+  width: 100%;
+  margin: 3px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.reference-picker-summary:disabled { cursor: default; }
+.reference-picker-full {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.reference-picker-play { width: 30px; height: 30px; flex: 0 0 auto; }
+.reference-picker-footer {
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--panel-deep);
+}
+.reference-picker-stats {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+}
+.reference-picker-dialog [hidden] { display: none !important; }
+.speaker-audio-count, .selected-library-count {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.compact-studio .voice-source-bar > .saved-voice-options > summary,
+.compact-studio .voice-source-bar > #describe-voice {
+  color: #a43c24 !important;
+  background: #fff5ef;
+  border: 1px solid #efc9ba;
+  border-radius: var(--radius-small);
+}
+.compact-studio .voice-source-bar > .saved-voice-options > summary:hover,
+.compact-studio .voice-source-bar > #describe-voice:hover {
+  background: #ffebe1;
+  color: #8f2f1b !important;
+}
+.dialogue-voice-option-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
+@media (max-width: 640px) {
+  .reference-picker-dialog {
+    width: calc(100% - 16px);
+    height: min(70vh, calc(100dvh - 16px));
+    max-height: calc(100dvh - 16px);
+  }
+  .reference-picker-filters .input { flex-basis: 100%; }
+  .reference-picker-stats { flex-basis: 100%; white-space: normal; }
+  .reference-picker-footer { flex-wrap: wrap; }
+}

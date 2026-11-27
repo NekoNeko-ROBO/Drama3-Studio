@@ -43,6 +43,7 @@
     design: fresh('design'), voiceSource: 'reference', designLegacy: null, writing: null, referenceTask: null,
     operation: null, returnDrafts: [], restoring: false, lastVoice: null,
     watch: null, lastSubmit: null, singleForm: null, singleReferences: [], libraryReferences: [],
+    referenceSelection: null,
     versionFocus: null, restoredFrom: null, restoredModel: null, designRecipe: null, designHistoryReturn: false,
     contexts: new Map(), contextLoads: new Map(), streamDraft: null, switchingInput: false };
   flow.voiceDraft = { main: ReferencePrep.fresh(), name: '', autoName: null };
@@ -103,6 +104,7 @@
         historyReturn: flow.designHistoryReturn,
         contentVersion: 2, ...copy(flow.writing.design) },
       voices: selectedVoices(), upload: state.cloneUpload, transcript: $('clone-transcript').value,
+      referenceSelection: copy(flow.referenceSelection),
       referenceCollapsed: !$('clone-upload-preview').open,
       cloneRecognition: { task: copy(state.cloneAsrTask), textRevision: state.cloneTextRevision,
         recognized: state.cloneAsrText, status: state.cloneAsrStatus,
@@ -175,6 +177,7 @@
       flow.singleReferences = value.references || [];
       flow.libraryReferences.forEach(ReferencePrep.cancel);
       flow.libraryReferences = value.libraryReferences || [];
+      flow.referenceSelection = selectionFromDraft(value);
       flow.restoredFrom = value.restoredFrom || null; flow.restoredModel = value.restoredModel || null;
       flow.design = value.design?.context || fresh('design'); flow.designRecipe = value.design?.recipe || null;
       flow.designHistoryReturn = value.design?.historyReturn
@@ -197,6 +200,7 @@
           $('clone-transcript').value = value.transcript || '';
         }
         $('clone-upload-preview').open = !value.referenceCollapsed;
+        flow.referenceSelection = null;
       } else {
         state.selectedVoiceIds = new Set(value.voices || []); updateVoiceSelection();
       }
@@ -410,6 +414,7 @@
     try {
       if (voiceDesignActive()) switchVoiceSource('reference');
       clearCloneAudio(); flow.single = { ...(version.studio || fresh('single')), layout: 'single' };
+      flow.referenceSelection = null;
       if (source.part_index !== undefined) flow.single.line_id = version.line_id;
       flow.operation = { action, source, original: version.text, model: recipe.model || null,
         rewordReferences: reword.bindings, legacy: !version.complete_recipe,
@@ -749,6 +754,7 @@
         flow.singleReferences = references.slice(1).map(preparedReference);
       }
       flow.single = { ...(Object.keys(draftStudio).length ? draftStudio : fresh('single')), layout: 'single' }; flow.operation = null;
+      flow.referenceSelection = null;
       flow.restoredFrom = source; flow.restoredModel = recipe.model || null;
       $('mode').value = ['audio_stream', 'stream'].includes(recipe.mode) ? 'tts' : recipe.mode || 'tts';
       $('text').value = draftTranscript(version.text);
@@ -1010,23 +1016,415 @@
     document.querySelector('#stream-fields .field-help').hidden = true;
     document.addEventListener('drama:editor-notice', event => fail(event.detail));
   }
-  async function useLibraryVoice(identifier) {
-    await guarded(async () => {
-      const designing = voiceDesignActive();
-      if (designing) switchVoiceSource('reference');
-      const fixed = designing || flow.operation || flow.restoredFrom || ['revision', 'edit', 'infill', 'stream'].includes($('mode').value);
-      if (fixed) {
-        await save(); stash();
-        flow.single = fresh('single'); flow.operation = null;
-        flow.restoredFrom = flow.restoredModel = null;
-        $('previous-take').value = $('source-take').value = ''; $('mode').value = 'tts';
-        clearMonitoredResult();
+  function normalizeReferenceSelection(value) {
+    if (!value || typeof value !== 'object' || typeof value.voiceId !== 'string') return null;
+    const keys = Array.isArray(value.keys)
+      ? value.keys.filter(key => typeof key === 'string' && key) : [];
+    return { voiceId: value.voiceId, keys: [...new Set(keys)] };
+  }
+  function referenceKeysForVoice(voiceId, indices = null) {
+    const clips = voiceById(voiceId)?.references || [];
+    const chosen = Array.isArray(indices) ? indices : clips.map((_clip, index) => index);
+    return chosen.map(index => clips[index]).filter(Boolean)
+      .map(clip => `reference:${clip.audio}`);
+  }
+  function legacySelectionForReference(voiceId, reference) {
+    if (!voiceId) return null;
+    let indices = null;
+    if (reference && Object.hasOwn(reference, 'groupReferences')) {
+      indices = [reference.referenceIndex ?? 0,
+        ...(reference.groupReferences || []).map(item => item.referenceIndex ?? 0)];
+    }
+    return { voiceId, keys: referenceKeysForVoice(voiceId, indices) };
+  }
+  function selectionFromDraft(value) {
+    if (Object.hasOwn(value || {}, 'referenceSelection')) {
+      return normalizeReferenceSelection(value.referenceSelection);
+    }
+    const voiceId = Array.isArray(value?.voices) ? value.voices[0] : null;
+    if (!voiceId) return null;
+    return legacySelectionForReference(voiceId,
+      (value.libraryReferences || []).find(item => item?.voiceId === voiceId));
+  }
+  function roleReferenceSelection(role) {
+    if (Object.hasOwn(role || {}, 'referenceSelection')) {
+      return normalizeReferenceSelection(role.referenceSelection);
+    }
+    if (!role?.voiceId || role.upload) return null;
+    return legacySelectionForReference(role.voiceId, Object.hasOwn(role, 'groupReferences')
+      ? { referenceIndex: role.referenceIndex ?? 0, groupReferences: role.groupReferences || [] }
+      : null);
+  }
+  function selectionCount(selection) {
+    return selection?.keys?.length || 0;
+  }
+  function refreshCreationVoiceLabels() {
+    for (const card of document.querySelectorAll('.voice-pick[data-voice]')) {
+      const voice = voiceById(card.dataset.voice), label = card.querySelector('small');
+      if (!voice || !label) continue;
+      const total = Number.isFinite(voice.entry_count)
+        ? voice.entry_count : (voice.references?.length ?? 0);
+      const selected = flow.referenceSelection?.voiceId === voice.id
+        ? selectionCount(flow.referenceSelection) : null;
+      label.textContent = `${t('{count} audio entries', { count: total })}${selected == null
+        ? '' : ` · ${t('{count} selected', { count: selected })}`}`;
+    }
+    for (const card of document.querySelectorAll('.voice-card[data-voice-id]')) {
+      const voice = voiceById(card.dataset.voiceId), label = card.querySelector('small');
+      if (!voice || !label) continue;
+      const total = Number.isFinite(voice.entry_count)
+        ? voice.entry_count : (voice.references?.length ?? 0);
+      label.textContent = t('{count} audio entries', { count: total });
+    }
+  }
+  async function applyCreationSelection(selection) {
+    const normalized = normalizeReferenceSelection(selection);
+    if (!normalized) return;
+    const designing = voiceDesignActive();
+    if (designing) switchVoiceSource('reference');
+    const fixed = designing || flow.operation || flow.restoredFrom
+      || ['revision', 'edit', 'infill', 'stream'].includes($('mode').value);
+    if (fixed) {
+      await save(); stash();
+      flow.single = fresh('single'); flow.operation = null;
+      flow.restoredFrom = flow.restoredModel = null;
+      $('previous-take').value = $('source-take').value = ''; $('mode').value = 'tts';
+      clearMonitoredResult();
+    }
+    clearCloneAudio();
+    const extra = flow.singleReferences; flow.singleReferences = [];
+    for (const reference of extra) ReferencePrep.cancel(reference);
+    renderExtraReferences();
+    flow.referenceSelection = { voiceId: normalized.voiceId, keys: normalized.keys.slice() };
+    state.selectedVoiceIds = new Set(normalized.keys.length ? [normalized.voiceId] : []);
+    updateVoiceSelection(); updateMode(); updateEditorMeta(); renderOperation();
+    if (state.view !== 'generate') view('generate');
+    $('saved-voice-options').open = false;
+    if (typeof renderVoices === 'function') renderVoices();
+    saveSoon();
+  }
+  function referenceMetaDuration(value) {
+    if (!Number.isFinite(value)) return '--:--';
+    const minutes = Math.floor(Math.max(0, value) / 60);
+    const seconds = Math.floor(Math.max(0, value) % 60);
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+  function referenceMetaBytes(value) {
+    if (!Number.isFinite(value)) return '';
+    if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`;
+    if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`;
+    if (value > 0) return `${Math.max(1, Math.round(value / 1024))} KB`;
+    return '0 KB';
+  }
+  function openReferencePicker({ context, initialVoiceId, confirmed, onConfirm }) {
+    stopVoicePreview();
+    document.querySelectorAll('audio').forEach(audio => audio.pause());
+    const initial = normalizeReferenceSelection(confirmed);
+    const working = { voiceId: initial?.voiceId || initialVoiceId || null,
+      keys: new Set(initial?.keys || []) };
+    if (initialVoiceId && working.voiceId !== initialVoiceId) {
+      working.voiceId = initialVoiceId; working.keys = new Set();
+    }
+    const dialog = makeDialog('Choose voice');
+    dialog.element.classList.add('reference-picker-dialog');
+    dialog.element.dataset.context = context || '';
+    const heading = dialog.element.querySelector('.studio-dialog-heading h2');
+    const top = node('div', 'reference-picker-top');
+    const back = command('Back to voices', () => showVoices(), 'text-btn reference-picker-back');
+    const voiceName = node('strong', 'reference-picker-voice-name');
+    const backRow = node('div', 'reference-picker-back-row'); backRow.append(back, voiceName);
+    const search = input('reference-picker-search', '', 'search');
+    search.placeholder = t('Search filename or text…');
+    search.setAttribute('aria-label', t('Search filename or text…'));
+    const tagDetails = node('details', 'reference-picker-tag-filter');
+    const tagSummary = node('summary', '', t('Filter by tags')); tagDetails.append(tagSummary);
+    const tagList = node('div', 'reference-picker-tag-list'); tagDetails.append(tagList);
+    const clearFilters = command('Clear filters', () => {
+      filter.query = ''; filter.tags.clear(); search.value = '';
+      buildTagList(); applyFilter();
+    }, 'text-btn');
+    const selectAll = input('reference-picker-select-all', '', 'checkbox');
+    const selectAllLabel = node('label', 'reference-picker-select-all');
+    selectAllLabel.append(selectAll, localized('span', '', 'Select all'));
+    const filters = node('div', 'reference-picker-filters');
+    filters.append(search, tagDetails, clearFilters, selectAllLabel);
+    top.append(backRow, filters);
+    const voiceHost = node('div', 'reference-picker-voice-list');
+    const entryWrap = node('div', 'reference-picker-entry-wrap');
+    const entryMessage = node('p', 'field-help reference-picker-message');
+    const entryNotice = node('p', 'form-note reference-picker-notice'); entryNotice.hidden = true;
+    const entryList = node('div', 'reference-picker-entry-list');
+    entryWrap.append(entryMessage, entryNotice, entryList);
+    dialog.body.classList.add('reference-picker-body');
+    dialog.body.append(top, voiceHost, entryWrap);
+    const stats = node('span', 'reference-picker-stats');
+    const cancel = command('Cancel', () => { releasePreview(); dialog.close(); }, 'secondary-btn');
+    const confirm = command('Use selected entries', () => confirmSelection(), 'primary-btn');
+    confirm.disabled = true;
+    dialog.footer.classList.add('reference-picker-footer');
+    dialog.footer.append(stats, cancel, confirm);
+
+    let entries = [], tags = [], tagMap = new Map(), rows = new Map();
+    let request = 0, loading = false, loadError = '';
+    let mode = 'voices', matched = 0;
+    const filter = { query: '', tags: new Set() };
+    const NO_TAG = '__none__';
+    const playback = new Audio(); playback.preload = 'metadata';
+    let playingKey = null, playToken = 0;
+
+    function setNotice(text) {
+      entryNotice.textContent = text || ''; entryNotice.hidden = !text;
+    }
+    function updatePlayButtons() {
+      for (const state of rows.values()) {
+        const active = state.entry.key === playingKey;
+        state.play.innerHTML = icon(active ? 'pause' : 'play');
+        state.play.setAttribute('aria-pressed', String(active));
+        state.play.title = t(active ? 'Pause audio' : 'Preview voice');
+        state.play.setAttribute('aria-label', `${t(active ? 'Pause audio' : 'Preview voice')} ${state.entry.filename}`);
       }
-      clearCloneAudio(); clearExtraReferences();
-      state.selectedVoiceIds.clear(); state.selectedVoiceIds.add(identifier);
-      updateVoiceSelection(); updateMode(); updateEditorMeta(); renderOperation();
-      view('generate'); $('saved-voice-options').open = false; saveSoon();
-      window.ReferencePrewarm?.schedule();
+    }
+    function stopPreview() {
+      playToken += 1; playingKey = null; playback.pause(); updatePlayButtons();
+    }
+    function releasePreview() {
+      stopPreview(); playback.removeAttribute('src'); playback.load();
+    }
+    function togglePreview(entry) {
+      if (playingKey === entry.key) { stopPreview(); return; }
+      const token = ++playToken;
+      playback.pause(); playback.src = entry.audio_url; playingKey = entry.key;
+      updatePlayButtons(); setNotice('');
+      playback.play().then(() => {
+        if (token !== playToken) return;
+        updatePlayButtons();
+      }).catch(() => {
+        if (token !== playToken) return;
+        playingKey = null; updatePlayButtons(); setNotice(t('Unable to play this audio.'));
+      });
+    }
+    playback.addEventListener('ended', () => {
+      if (!playback.paused) return;
+      playingKey = null; updatePlayButtons();
+    });
+    function setView() {
+      const entryView = mode === 'entries';
+      heading.textContent = t('Choose voice');
+      top.hidden = !entryView;
+      backRow.hidden = !entryView;
+      filters.hidden = !entryView;
+      voiceHost.hidden = entryView;
+      entryWrap.hidden = !entryView;
+      stats.hidden = !entryView;
+      confirm.hidden = !entryView;
+      if (!entryView) { entryMessage.hidden = true; setNotice(''); }
+    }
+    function syncFooter() {
+      const selectedEntries = entries.filter(entry => working.keys.has(entry.key));
+      const visibleKeys = new Set(entries.filter(entry => !rows.get(entry.key)?.row.hidden)
+        .map(entry => entry.key));
+      const hiddenCount = selectedEntries.filter(entry => !visibleKeys.has(entry.key)).length;
+      let bytes = null, duration = null;
+      if (selectedEntries.length && selectedEntries.every(entry => Number.isFinite(entry.bytes))) {
+        bytes = selectedEntries.reduce((sum, entry) => sum + entry.bytes, 0);
+      }
+      if (selectedEntries.length && selectedEntries.every(entry => Number.isFinite(entry.duration))) {
+        duration = selectedEntries.reduce((sum, entry) => sum + entry.duration, 0);
+      }
+      stats.textContent = [
+        t('{count} selected', { count: selectedEntries.length }),
+        `${t('Hidden selected')} ${hiddenCount}`,
+        t('{count} matching', { count: matched }),
+        bytes == null ? '' : referenceMetaBytes(bytes),
+        duration == null ? '' : referenceMetaDuration(duration),
+      ].filter(Boolean).join(' · ');
+      confirm.disabled = loading || Boolean(loadError) || !working.voiceId;
+    }
+    function syncSelectionUI() {
+      for (const state of rows.values()) state.checkbox.checked = working.keys.has(state.entry.key);
+      const visible = entries.filter(entry => !rows.get(entry.key)?.row.hidden);
+      const selected = visible.filter(entry => working.keys.has(entry.key)).length;
+      selectAll.disabled = loading || Boolean(loadError) || !visible.length;
+      selectAll.checked = visible.length > 0 && selected === visible.length;
+      selectAll.indeterminate = selected > 0 && selected < visible.length;
+      syncFooter();
+    }
+    function matches(entry) {
+      if (filter.query) {
+        const filename = String(entry.filename || '').normalize('NFKC').toLowerCase();
+        const text = String(entry.text || '').normalize('NFKC').toLowerCase();
+        if (!filename.includes(filter.query) && !text.includes(filter.query)) return false;
+      }
+      if (!filter.tags.size) return true;
+      const ids = entry.tag_ids || [];
+      if (!ids.length) return filter.tags.has(NO_TAG);
+      return ids.some(id => filter.tags.has(id));
+    }
+    function applyFilter() {
+      matched = 0;
+      for (const entry of entries) {
+        const state = rows.get(entry.key); if (!state) continue;
+        const visible = matches(entry);
+        state.row.hidden = !visible;
+        if (visible) matched += 1;
+      }
+      entryMessage.hidden = loading || matched > 0 || Boolean(loadError);
+      if (!loading && !loadError) {
+        entryMessage.textContent = entries.length ? t('No matching audio') : t('No audio entries');
+      }
+      syncSelectionUI();
+    }
+    function tagChip(tag) {
+      const chip = node('span', 'reference-picker-tag', tag.name || '');
+      chip.style.borderColor = tag.color || 'var(--line)';
+      chip.style.color = tag.color || 'var(--muted)';
+      return chip;
+    }
+    function buildTagList() {
+      const known = new Set(tags.map(tag => tag.id));
+      for (const id of [...filter.tags]) if (id !== NO_TAG && !known.has(id)) filter.tags.delete(id);
+      tagList.replaceChildren();
+      const add = (id, label, tag) => {
+        const check = input('', '', 'checkbox'); check.checked = filter.tags.has(id);
+        check.onchange = () => {
+          if (check.checked) filter.tags.add(id); else filter.tags.delete(id);
+          tagSummary.textContent = `${t('Filter by tags')}${filter.tags.size ? ` (${filter.tags.size})` : ''}`;
+          applyFilter();
+        };
+        const row = node('label', 'reference-picker-tag-option');
+        row.append(check, tag ? tagChip(tag) : node('span', '', label));
+        tagList.append(row);
+      };
+      add(NO_TAG, t('No tags'), null);
+      for (const tag of tags) add(tag.id, tag.name, tag);
+      tagSummary.textContent = `${t('Filter by tags')}${filter.tags.size ? ` (${filter.tags.size})` : ''}`;
+    }
+    function buildRows() {
+      rows = new Map(); entryList.replaceChildren();
+      for (const entry of entries) {
+        const row = node('div', 'reference-picker-entry'); row.dataset.key = entry.key;
+        const check = input('', '', 'checkbox'); check.checked = working.keys.has(entry.key);
+        check.setAttribute('aria-label', entry.filename);
+        check.onchange = () => {
+          if (check.checked) working.keys.add(entry.key); else working.keys.delete(entry.key);
+          syncSelectionUI();
+        };
+        const checkLabel = node('label', 'reference-picker-check'); checkLabel.append(check);
+        const content = node('div', 'reference-picker-entry-content');
+        const head = node('div', 'reference-picker-entry-head');
+        const name = node('strong', 'reference-picker-filename', entry.filename); name.title = entry.filename;
+        const duration = node('span', 'reference-picker-duration', referenceMetaDuration(entry.duration));
+        const tagBox = node('span', 'reference-picker-entry-tags');
+        for (const id of entry.tag_ids || []) { const tag = tagMap.get(id); if (tag) tagBox.append(tagChip(tag)); }
+        head.append(name, tagBox, duration);
+        const summary = node('button', 'reference-picker-summary', entry.text || t('No transcript'));
+        summary.type = 'button'; summary.disabled = !entry.text;
+        summary.setAttribute('aria-expanded', 'false');
+        const full = node('div', 'reference-picker-full', entry.text); full.hidden = true;
+        summary.onclick = () => {
+          full.hidden = !full.hidden; summary.setAttribute('aria-expanded', String(!full.hidden));
+        };
+        content.append(head, summary, full);
+        const play = node('button', 'icon-btn reference-picker-play');
+        play.type = 'button'; play.innerHTML = icon('play');
+        play.onclick = () => togglePreview(entry);
+        row.append(checkLabel, content, play);
+        entryList.append(row);
+        rows.set(entry.key, { entry, row, checkbox: check, summary, full, play });
+      }
+      updatePlayButtons();
+    }
+    function renderVoiceList() {
+      voiceHost.replaceChildren();
+      if (!state.voices.length) {
+        voiceHost.append(localized('p', 'field-help', 'No saved voices yet')); return;
+      }
+      for (const voice of state.voices) {
+        const total = Number.isFinite(voice.entry_count)
+          ? voice.entry_count : (voice.references?.length ?? 0);
+        const confirmedHere = confirmed?.voiceId === voice.id;
+        const workingHere = working.voiceId === voice.id;
+        const selected = workingHere ? working.keys.size
+          : (confirmedHere ? confirmed.keys.length : 0);
+        const known = confirmedHere || (workingHere && working.keys.size > 0);
+        const item = node('button', 'reference-picker-voice');
+        item.type = 'button';
+        const name = node('strong', '', voice.name);
+        const meta = node('span', 'reference-picker-voice-meta',
+          `${t('{count} audio entries', { count: total })}${known ? ` · ${t('{count} selected', { count: selected })}` : ''}`);
+        item.append(name, meta);
+        item.onclick = () => showEntries(voice.id);
+        voiceHost.append(item);
+      }
+    }
+    function showVoices() {
+      request += 1; loading = false; loadError = ''; mode = 'voices';
+      releasePreview(); setView(); renderVoiceList(); entryList.replaceChildren();
+      rows = new Map(); entries = []; matched = 0; stats.textContent = '';
+    }
+    async function showEntries(voiceId) {
+      const token = ++request;
+      if (working.voiceId !== voiceId) { working.voiceId = voiceId; working.keys = new Set(); }
+      mode = 'entries'; loading = true; loadError = '';
+      releasePreview(); setView(); setNotice('');
+      const voice = voiceById(voiceId);
+      voiceName.textContent = voice?.name || voiceId;
+      entryList.replaceChildren(); rows = new Map(); entries = []; tags = []; tagMap = new Map();
+      filter.tags.clear(); buildTagList();
+      selectAll.checked = false; selectAll.indeterminate = false; selectAll.disabled = true;
+      entryMessage.hidden = false; entryMessage.textContent = t('Loading audio…');
+      stats.textContent = ''; confirm.disabled = true;
+      try {
+        const data = await api(`/api/voices/${encodeURIComponent(voiceId)}/reference-entries`);
+        if (token !== request || !dialog.element.open || working.voiceId !== voiceId) return;
+        loading = false;
+        entries = Array.isArray(data.entries) ? data.entries : [];
+        tags = Array.isArray(data.tags) ? data.tags : [];
+        tagMap = new Map(tags.map(tag => [tag.id, tag]));
+        const valid = new Set(entries.map(entry => entry.key));
+        for (const key of [...working.keys]) if (!valid.has(key)) working.keys.delete(key);
+        buildTagList(); buildRows(); applyFilter();
+        if (!entries.length) { entryMessage.hidden = false; entryMessage.textContent = t('No audio entries'); }
+      } catch (error) {
+        if (token !== request || !dialog.element.open) return;
+        loading = false; loadError = message(error.message); entries = []; rows = new Map();
+        entryList.replaceChildren();
+        entryMessage.hidden = false; entryMessage.textContent = loadError;
+        setNotice(loadError);
+      } finally {
+        if (token === request) { loading = false; confirm.disabled = Boolean(loadError) || !working.voiceId; }
+      }
+    }
+    function confirmSelection() {
+      if (loading || loadError || !working.voiceId) return;
+      const keys = entries.filter(entry => working.keys.has(entry.key)).map(entry => entry.key);
+      const selection = { voiceId: working.voiceId, keys };
+      releasePreview(); dialog.close(); onConfirm(selection);
+    }
+    selectAll.onchange = () => {
+      for (const entry of entries) {
+        const state = rows.get(entry.key); if (!state || state.row.hidden) continue;
+        if (selectAll.checked) working.keys.add(entry.key); else working.keys.delete(entry.key);
+      }
+      syncSelectionUI();
+    };
+    search.oninput = () => { filter.query = search.value.normalize('NFKC').toLowerCase().trim(); applyFilter(); };
+    dialog.element.addEventListener('close', () => { request += 1; releasePreview(); });
+    dialog.element.addEventListener('cancel', () => { request += 1; releasePreview(); });
+    dialog.element.querySelector('.studio-dialog-heading .icon-btn')
+      ?.addEventListener('click', () => { request += 1; releasePreview(); });
+    setView(); renderVoiceList();
+    dialog.show();
+    if (initialVoiceId) showEntries(initialVoiceId);
+    else showVoices();
+  }
+  async function useLibraryVoice(identifier) {
+    const voice = voiceById(identifier);
+    if (!voice) return;
+    const current = flow.referenceSelection?.voiceId === identifier ? flow.referenceSelection : null;
+    openReferencePicker({
+      context: 'creation', initialVoiceId: identifier, confirmed: current,
+      onConfirm: selection => { guarded(() => applyCreationSelection(selection)); },
     });
   }
   function clearMonitoredResult() {
@@ -1142,15 +1540,23 @@
         play.disabled = !voice?.audio_url;
         const clear = command('Remove audio', () => {
           stopVoicePreview(); state.selectedVoiceIds.delete(reference.libraryId);
+          if (flow.referenceSelection?.voiceId === reference.libraryId) flow.referenceSelection = null;
           updateVoiceSelection(); saveSoon(); window.ReferencePrewarm?.schedule(0);
         }, 'icon-btn selected-voice-clear');
         delete clear.dataset.i18n; clear.innerHTML = icon('close');
         clear.dataset.i18nAriaLabel = clear.dataset.i18nTitle = 'Remove audio';
         clear.setAttribute('aria-label', t('Remove audio')); clear.title = t('Remove audio');
-        row.append(name, play, clear); box.append(row);
+        row.append(name, play, node('span', 'selected-library-count'), clear); box.append(row);
       }
       const name = row.querySelector('strong');
       name.textContent = voice?.name || reference.libraryId; name.title = name.textContent;
+      const count = flow.referenceSelection?.voiceId === reference.libraryId
+        ? selectionCount(flow.referenceSelection) : null;
+      const countNode = row.querySelector('.selected-library-count');
+      if (countNode) {
+        countNode.textContent = count == null ? '' : t('{count} selected', { count });
+        countNode.hidden = count == null;
+      }
       row.querySelector('.reference-compact-play').disabled = !voice?.audio_url;
       existing.delete(reference.libraryId);
     }
@@ -1345,6 +1751,12 @@
       const name = row.querySelector('.speaker-audio-name');
       name.textContent = material.name || t('No voice selected'); name.title = material.name || '';
       if (!material.name) name.dataset.i18n = 'No voice selected'; else delete name.dataset.i18n;
+      const selection = roleReferenceSelection(role), count = row.querySelector('.speaker-audio-count');
+      if (count) {
+        const show = Object.hasOwn(role, 'referenceSelection') || Boolean(selection);
+        count.textContent = show ? t('{count} selected', { count: selectionCount(selection) }) : '';
+        count.hidden = !show;
+      }
       insert.setAttribute('aria-label', t('Add a turn for {speaker}', { speaker: speakerLabel(role) }));
       insert.title = t('Add a turn for {speaker}', { speaker: speakerLabel(role) });
       insert.disabled = flow.scene.operation?.action === 'revision';
@@ -1365,7 +1777,8 @@
     row.dataset.speaker = role.speaker; row.boundRole = role;
     const insert = command('', () => ScriptEditor.append($('dialogue-script'), `${speakerLabel(role)}:`), 'speaker-insert');
     delete insert.dataset.i18n;
-    insert.append(node('span', 'speaker-badge', speakerLabel(role)), node('span', 'speaker-audio-name'));
+    insert.append(node('span', 'speaker-badge', speakerLabel(role)), node('span', 'speaker-audio-name'),
+      node('span', 'speaker-audio-count'));
     const play = speakerTool('Preview voice', 'play', async () => {
       let material = speakerAudio(role);
       if (!material.url && material.reference.upload?.id) {
@@ -1399,6 +1812,22 @@
     stopVoicePreview();
     textarea.value = nextScript; ScriptEditor.sync(textarea);
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    renderSpeakers(); saveSoon();
+  }
+  function applyRoleSelection(role, selection, dialog) {
+    if (flow.scene.operation || state.jobSubmitting) return;
+    const normalized = normalizeReferenceSelection(selection);
+    const current = flow.scene.roles.find(item => item.id === role.id);
+    if (!normalized || !current) return;
+    ReferencePrep.cancel(current);
+    (current.extraReferences || []).forEach(ReferencePrep.cancel);
+    const base = normalized.keys.length ? ReferencePrep.forVoice(normalized.voiceId) : {};
+    const updated = { ...ReferencePrep.fresh(), ...base, id: current.id, name: current.name,
+      speaker: current.speaker, description: current.description,
+      extraReferences: [], referenceSelection: { voiceId: normalized.voiceId, keys: normalized.keys.slice() } };
+    flow.scene.roles[flow.scene.roles.indexOf(current)] = updated;
+    stopVoicePreview();
+    if (dialog) dialog.close();
     renderSpeakers(); saveSoon();
   }
   function chooseSpeakerVoice(role) {
@@ -1449,9 +1878,24 @@
         ...(item.references || []).map(clip => clip.transcript)].join(' ').normalize('NFKC').toLowerCase().includes(query))) {
         const row = node('div', 'dialogue-voice-option'); row.dataset.voiceId = voice.id;
         const selected = draft.voiceId === voice.id && !draft.upload;
-        const pick = command('', () => choose(voice.id), 'dialogue-voice-pick');
+        const pick = command('', () => {
+          openReferencePicker({
+            context: role.id, initialVoiceId: voice.id,
+            confirmed: roleReferenceSelection(role),
+            onConfirm: selection => { applyRoleSelection(role, selection, dialog); },
+          });
+        }, 'dialogue-voice-pick');
         delete pick.dataset.i18n;
-        pick.append(node('span', '', voice.name)); pick.setAttribute('aria-pressed', String(selected));
+        pick.append(node('span', '', voice.name));
+        const total = Number.isFinite(voice.entry_count)
+          ? voice.entry_count : (voice.references?.length ?? 0);
+        const selectedSelection = roleReferenceSelection(role);
+        const selectedCount = selectedSelection?.voiceId === voice.id
+          ? selectionCount(selectedSelection) : null;
+        pick.append(node('span', 'dialogue-voice-option-meta',
+          `${t('{count} audio entries', { count: total })}${selectedCount == null
+            ? '' : ` · ${t('{count} selected', { count: selectedCount })}`}`));
+        pick.setAttribute('aria-pressed', String(selected));
         if (selected) { const check = node('span', 'voice-choice-check'); check.innerHTML = icon('check'); pick.append(check); }
         const preview = speakerTool('Preview voice', 'play', () => previewVoice(voice, preview));
         preview.classList.add('dialogue-voice-preview'); preview.setAttribute('aria-pressed', 'false');
@@ -2047,9 +2491,20 @@
     lockVoice: () => Boolean(flow.operation && !flow.operation.legacy),
     prepareRequest, submitted, enhanceResult, enhanceSegment, afterResults,
     useLibraryVoice, referenceChanged: saveSoon, referencePrewarmPayload,
+    refreshVoiceLabels: refreshCreationVoiceLabels,
+    creationSelectionCount: voiceId => flow.referenceSelection?.voiceId === voiceId
+      ? selectionCount(flow.referenceSelection) : null,
+    clearReferenceSelection: () => {
+      if (flow.restoring) return;
+      flow.referenceSelection = null;
+      if ($('selected-reference-details')) renderLibraryReferences();
+      if (typeof renderVoices === 'function') renderVoices();
+      saveSoon();
+    },
     voicesChanged: () => {
       ReferencePrep.refreshLibraries();
       if ($('selected-reference-details')) renderLibraryReferences();
+      refreshCreationVoiceLabels();
       renderSpeakers();
       syncControls();
     },
