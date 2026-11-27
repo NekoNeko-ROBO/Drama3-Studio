@@ -926,14 +926,6 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   overflow-wrap: anywhere;
 }
 
-.voice-detail-row-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 6px;
-  font-size: 12px;
-}
-
 .voice-detail-source {
   padding: 1px 6px;
   border: 1px solid var(--accent-line);
@@ -948,13 +940,6 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
 }
 
 /* 语音详情：素材识别结果（本模块新增） */
-.voice-detail-row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
 .voice-detail-candidate {
   margin-top: 8px;
   padding: 8px 10px;
@@ -994,4 +979,248 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   border-color: var(--accent);
   background: #fff;
   box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* 语音详情：删除素材确认（本模块新增） */
+.voice-asset-delete-dialog {
+  background: #fff;
+}
+
+.voice-asset-delete-name {
+  margin: 0 0 8px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.voice-asset-delete-dirty {
+  margin: 8px 0 0;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.voice-asset-delete-error {
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.voice-asset-delete-dialog .voice-asset-delete-danger {
+  border-color: var(--accent);
+  background: #fff;
+  color: var(--accent);
+}
+
+.voice-asset-delete-dialog .voice-asset-delete-danger:hover:enabled {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 语音详情：紧凑横向布局与自绘播放器（本模块新增） */
+#voice-detail .voice-detail-table {
+  min-width: 820px;
+}
+
+#voice-detail .voice-detail-table th:first-child {
+  width: 44px;
+}
+
+#voice-detail .voice-detail-table th:nth-child(2) {
+  width: 300px;
+}
+
+#voice-detail .voice-detail-table th:nth-child(3) {
+  width: 220px;
+}
+
+#voice-detail .voice-detail-table th:nth-child(5) {
+  width: 96px;
+}
+
+#voice-detail .voice-detail-table td {
+  vertical-align: middle;
+}
+
+#voice-detail .voice-detail-table .voice-detail-number {
+  color: var(--muted);
+  text-align: center;
+}
+
+#voice-detail .voice-detail-type-cell {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#voice-detail .voice-detail-type-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+#voice-detail .voice-detail-type .voice-detail-source {
+  display: inline-block;
+}
+
+#voice-detail .voice-detail-type .voice-detail-asset-name {
+  display: block;
+  max-width: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+#voice-detail .voice-detail-table .voice-detail-status {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+#voice-detail .voice-detail-table .voice-detail-status:empty {
+  display: none;
+}
+
+.voice-detail-action-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.voice-detail-action-stack .secondary-btn {
+  width: 100%;
+}
+
+.voice-detail-player {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--accent-line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.voice-detail-player audio,
+#voice-detail .voice-detail-table .voice-detail-player audio {
+  display: none;
+}
+
+.voice-detail-player-controls {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.voice-detail-play,
+.voice-detail-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.voice-detail-play:hover,
+.voice-detail-more:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.voice-detail-play .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.voice-detail-more {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.voice-detail-seek {
+  flex: 1 1 auto;
+  min-width: 40px;
+  accent-color: var(--accent);
+}
+
+.voice-detail-time {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.voice-detail-menu {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 152px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 32px #17202e1f;
+}
+
+.voice-detail-menu[hidden] {
+  display: none;
+}
+
+.voice-detail-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.voice-detail-menu-item:hover,
+.voice-detail-menu-item:focus-visible {
+  background: var(--panel-deep);
+}
+
+.voice-detail-menu-item[aria-checked="true"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.voice-detail-menu-label {
+  margin: 6px 0 2px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.voice-detail-menu-danger {
+  color: var(--danger);
+}
+
+.voice-detail-player-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
 }

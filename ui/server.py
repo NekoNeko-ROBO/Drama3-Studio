@@ -166,6 +166,29 @@ def _write_voice_dataset(folder: Path, assets: list[dict]):
         temporary.unlink(missing_ok=True)
 
 
+def _write_voice_metadata(path: Path, metadata: dict):
+    temporary = path.with_name(f"voice-{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _unlink_released(path: Path, attempts: int = 3, delay: float = 0.1):
+    """Remove a clip file, retrying briefly while Windows still holds the handle."""
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError as exc:
+            # 32 = ERROR_SHARING_VIOLATION: a player may still be closing the stream.
+            if getattr(exc, "winerror", None) != 32 or attempt + 1 >= attempts:
+                raise
+            time.sleep(delay)
+
+
 def inspect_model(path):
     return inspect_gguf(path) if is_gguf(path) else inspect_checkpoint(path)
 
@@ -2043,17 +2066,21 @@ class AppState:
         if not metadata_path.is_file():
             raise ValueError("Voice does not exist")
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        raw = metadata.get("references") or [{"audio": metadata["audio"], "transcript": metadata["transcript"]}]
-        if not isinstance(raw, list) or not 1 <= len(raw) <= 32:
-            raise ValueError("Invalid saved reference group")
+        if "references" in metadata:
+            raw = metadata.get("references")
+            if not isinstance(raw, list) or len(raw) > 32:
+                raise ValueError("Invalid saved reference group")
+        else:
+            raw = [{"audio": metadata["audio"], "transcript": metadata["transcript"]}]
         references = []
         for item in raw:
             audio = _inside(path / item["audio"], path)
             if not audio.is_file():
                 raise ValueError("Reference audio is missing")
             references.append({**item, "audio_path": str(audio), "audio_url": self._audio_url(audio)})
-        return {**metadata, "id": voice_id, "audio_path": references[0]["audio_path"],
-                "audio_url": references[0]["audio_url"], "references": references}
+        first = references[0] if references else {}
+        return {**metadata, "id": voice_id, "audio_path": first.get("audio_path", ""),
+                "audio_url": first.get("audio_url", ""), "references": references}
 
     def update_voice_transcript(self, payload):
         if not isinstance(payload, dict):
@@ -2164,16 +2191,87 @@ class AppState:
         folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
         if not (folder / "voice.json").is_file():
             raise ValueError("Voice does not exist")
-        with self._reference_assets_lock:
-            target = next((item for item in _read_voice_dataset(folder) if item["id"] == clip_id), None)
+        # Hold the engine lock across path lookup and ASR registration so a
+        # concurrent dataset delete cannot remove the audio in between. The
+        # assets lock is only held for the short metadata lookup.
+        with self._engine_lock:
+            with self._reference_assets_lock:
+                target = next((item for item in _read_voice_dataset(folder) if item["id"] == clip_id), None)
+                if target is None:
+                    raise ValueError("Clip does not exist")
+                audio = _inside(folder / target["audio"], folder)
+                if not audio.is_file():
+                    raise ValueError("Audio file is missing")
+            self.asr.executor = self._executor
+            return self.asr.start(audio, force=force, local_only=True)
+
+    def delete_voice_dataset_asset(self, voice_id: str, clip_id: str) -> dict:
+        if not isinstance(clip_id, str) or not re.fullmatch(r"[a-f0-9]{32}", clip_id):
+            raise ValueError("Invalid clip id")
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        # Take the engine lock first, like record cleanup, so no new ASR task can
+        # start between the pending check and removing the file.
+        with self._engine_lock, self._reference_assets_lock:
+            assets = _read_voice_dataset(folder)
+            target = next((item for item in assets if item["id"] == clip_id), None)
             if target is None:
                 raise ValueError("Clip does not exist")
             audio = _inside(folder / target["audio"], folder)
-            if not audio.is_file():
-                raise ValueError("Audio file is missing")
-        with self._engine_lock:
-            self.asr.executor = self._executor
-            return self.asr.start(audio, force=force, local_only=True)
+            if any(Path(pending).resolve() == audio for pending in self.asr.pending_audio()):
+                raise ValueError("This audio is being transcribed; wait for it to finish")
+            remaining = [item for item in assets if item["id"] != clip_id]
+            _write_voice_dataset(folder, remaining)
+            try:
+                _unlink_released(audio)
+            except OSError:
+                # Keep the audio and its metadata together when the file cannot be removed.
+                _write_voice_dataset(folder, assets)
+                raise
+            return {"voice_id": voice_id, "deleted": clip_id}
+
+    def delete_voice_reference(self, voice_id: str, reference_index, audio) -> dict:
+        if isinstance(reference_index, bool) or not isinstance(reference_index, int):
+            raise ValueError("Invalid saved reference index")
+        if not isinstance(audio, str) or not audio or Path(audio).name != audio:
+            raise ValueError("Invalid reference audio name")
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        metadata_path = folder / "voice.json"
+        if not metadata_path.is_file():
+            raise ValueError("Voice does not exist")
+        with self._engine_lock, self._reference_assets_lock:
+            voice = self._voice(voice_id)
+            references = voice["references"]
+            if not 0 <= reference_index < len(references):
+                raise ValueError("Invalid saved reference index")
+            if references[reference_index].get("audio") != audio:
+                raise ValueError("Reference audio changed; reopen the voice detail")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            raw = metadata.get("references")
+            if not isinstance(raw, list):
+                raw = [{"audio": metadata.get("audio", ""), "transcript": metadata.get("transcript", "")}]
+            if not 0 <= reference_index < len(raw) or raw[reference_index].get("audio") != audio:
+                raise ValueError("Reference audio changed; reopen the voice detail")
+            remaining = [item for position, item in enumerate(raw) if position != reference_index]
+            audio_path = _inside(folder / audio, folder)
+            shared = any(item.get("audio") == audio for item in remaining)
+            if not shared and audio_path.is_file() and any(
+                    Path(pending).resolve() == audio_path for pending in self.asr.pending_audio()):
+                raise ValueError("This audio is being transcribed; wait for it to finish")
+            original = json.dumps(metadata, ensure_ascii=False)
+            first = remaining[0] if remaining else {}
+            metadata["references"] = remaining
+            metadata["audio"] = first.get("audio", "")
+            metadata["transcript"] = first.get("transcript", "")
+            _write_voice_metadata(metadata_path, metadata)
+            if not shared:
+                try:
+                    _unlink_released(audio_path)
+                except OSError:
+                    _write_voice_metadata(metadata_path, json.loads(original))
+                    raise
+            return self._voice(voice_id)
 
     def list_voices(self, *, retained=False):
         result = []
@@ -2556,6 +2654,8 @@ class AppState:
                     raise ValueError("Each voice binding must be an object")
                 if "voice_id" in item:
                     voice = self._voice(item["voice_id"])
+                    if not voice["references"]:
+                        raise ValueError("This voice has no reference audio; import or add one first")
                     index = item.get("reference_index")
                     if index is not None and (
                             isinstance(index, bool) or not isinstance(index, int)
@@ -2578,6 +2678,8 @@ class AppState:
             raise ValueError("Voice IDs must be a list of at most 32 voices")
         for voice_id in identifiers:
             voice = self._voice(voice_id)
+            if not voice["references"]:
+                raise ValueError("This voice has no reference audio; import or add one first")
             references.extend(VoiceReference(clip["audio_path"], clip["transcript"], int(voice.get("speaker", 0)))
                               for clip in voice["references"])
         references.extend(self._uploaded_references(payload))
@@ -3413,6 +3515,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(202, STATE.start_voice_asset_transcription(
                     asset_transcription.group(1), asset_transcription.group(2),
                     payload.get("force", False)))
+            asset_delete = re.fullmatch(
+                r"/api/voices/([^/]+)/clips/([a-f0-9]{32})/delete", path)
+            if asset_delete:
+                payload = self._payload()
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid delete request")
+                return self._json(200, STATE.delete_voice_dataset_asset(
+                    asset_delete.group(1), asset_delete.group(2)))
+            reference_delete = re.fullmatch(r"/api/voices/([^/]+)/references/delete", path)
+            if reference_delete:
+                payload = self._payload()
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid delete request")
+                return self._json(200, STATE.delete_voice_reference(
+                    reference_delete.group(1), payload.get("reference_index"),
+                    payload.get("audio")))
             if path.startswith("/api/voices/") and path.endswith("/clips"):
                 if self.headers.get_content_type() != "multipart/form-data":
                     return self._json(415, {"error": "Expected a multipart request"})

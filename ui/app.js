@@ -1335,7 +1335,7 @@ function leaveVoiceDetail() {
   voiceDetail.assets = [];
   setVoiceDetailImportStatus('');
   stopVoicePreview();
-  $('voice-detail').querySelectorAll('audio').forEach(audio => audio.pause());
+  unloadVoiceDetailAudio($('voice-detail'));
   $('voice-detail').hidden = true;
   $('voice-list').hidden = false;
   document.querySelector('#view-voices .voice-library-toolbar').hidden = false;
@@ -1393,26 +1393,9 @@ function updateVoiceDetailCount() {
   $('voice-detail-count').textContent = `${total} 条语音`;
 }
 
-function voiceDetailRowMeta(label) {
-  const meta = document.createElement('p');
-  meta.className = 'voice-detail-row-meta';
-  const tag = document.createElement('span');
-  tag.className = 'voice-detail-source';
-  tag.textContent = label;
-  meta.append(tag);
-  return meta;
-}
-
 function voiceDetailUnsaved() {
   return [...$('voice-detail').querySelectorAll('textarea')]
     .some(editor => editor.value !== editor.defaultValue);
-}
-
-function voiceDetailActionRow(...buttons) {
-  const actions = document.createElement('div');
-  actions.className = 'voice-detail-row-actions';
-  actions.append(...buttons);
-  return actions;
 }
 
 function voiceDetailCandidateBlock() {
@@ -1478,7 +1461,7 @@ function voiceDetailIdentifier({ row, editor, status, identify, save, adopt, clo
           text.textContent = value;
           box.hidden = false;
           hasCandidate = true;
-          status.textContent = '识别完成，请校对后采用。';
+          status.textContent = '识别完成';
           finish();
           return;
         }
@@ -1521,77 +1504,307 @@ function voiceDetailIdentifier({ row, editor, status, identify, save, adopt, clo
     if (!candidate) return;
     editor.value = candidate;
     box.hidden = true;
-    status.textContent = '已填入识别结果，尚未保存。';
+    status.textContent = '尚未保存';
   };
-  close.onclick = () => { box.hidden = true; };
+  close.onclick = () => {
+    box.hidden = true;
+    if (status.textContent !== '识别完成') return;
+    status.textContent = editor.value !== editor.defaultValue ? '尚未保存' : '';
+  };
   return { isRunning: () => running };
 }
 
-function voiceDetailAssetRow(asset, index) {
-  const base = $('voice-detail-rows').children.length;
+const voiceDetailRowState = new WeakMap();
+const VOICE_PLAYER_RATES = [1, 0.5, 1.5, 2];
+let openVoiceDetailMenu = null;
+let voiceDeleteContext = null, voiceDeleteBusy = false;
+
+function voiceDetailClock(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
+  const total = Math.round(seconds);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function closeVoiceDetailMenus() {
+  if (!openVoiceDetailMenu) return;
+  openVoiceDetailMenu.menu.hidden = true;
+  openVoiceDetailMenu.trigger.setAttribute('aria-expanded', 'false');
+  openVoiceDetailMenu = null;
+}
+
+function releaseVoiceDetailAudio(audioUrl) {
+  const released = [];
+  stopVoicePreview();
+  if (!audioUrl) return released;
+  for (const audio of document.querySelectorAll('audio')) {
+    if (audio.getAttribute('src') !== audioUrl) continue;
+    released.push({ audio, src: audioUrl, preload: audio.preload });
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  }
+  return released;
+}
+
+function restoreVoiceDetailAudio(released) {
+  for (const item of released) {
+    if (!item.audio.isConnected) continue;
+    item.audio.preload = item.preload;
+    item.audio.setAttribute('src', item.src);
+    item.audio.load();
+  }
+}
+
+function unloadVoiceDetailAudio(root) {
+  for (const audio of root.querySelectorAll('audio')) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  }
+}
+
+function voiceDetailPlayer({ audioUrl, preload, onDelete, deleteLabel }) {
+  const box = document.createElement('div');
+  box.className = 'voice-detail-player';
+  const audio = document.createElement('audio');
+  audio.preload = preload;
+  audio.src = audioUrl;
+  box.append(audio);
+
+  const controls = document.createElement('div');
+  controls.className = 'voice-detail-player-controls';
+  const play = document.createElement('button');
+  play.type = 'button';
+  play.className = 'voice-detail-play';
+  play.innerHTML = icon('play');
+  play.setAttribute('aria-label', '播放');
+  play.title = '播放';
+  const seek = document.createElement('input');
+  Object.assign(seek, { type: 'range', min: '0', max: '0', step: '0.01', value: '0' });
+  seek.className = 'voice-detail-seek';
+  seek.disabled = true;
+  seek.setAttribute('aria-label', '播放进度');
+  const time = document.createElement('span');
+  time.className = 'voice-detail-time';
+  time.textContent = '0:00 / --:--';
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'voice-detail-more';
+  more.textContent = '⋯';
+  more.title = '更多操作';
+  more.setAttribute('aria-label', '更多操作');
+  more.setAttribute('aria-haspopup', 'menu');
+  more.setAttribute('aria-expanded', 'false');
+
+  const menu = document.createElement('div');
+  menu.className = 'voice-detail-menu';
+  menu.setAttribute('role', 'menu');
+  menu.hidden = true;
+  const download = document.createElement('a');
+  download.className = 'voice-detail-menu-item';
+  download.setAttribute('role', 'menuitem');
+  download.setAttribute('download', '');
+  download.href = audioUrl;
+  download.textContent = '下载音频';
+  download.addEventListener('click', () => closeVoiceDetailMenus());
+  const speedLabel = document.createElement('p');
+  speedLabel.className = 'voice-detail-menu-label';
+  speedLabel.textContent = '播放速度';
+  menu.append(download, speedLabel);
+  const speeds = VOICE_PLAYER_RATES.map(rate => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'voice-detail-menu-item';
+    item.setAttribute('role', 'menuitemradio');
+    item.dataset.rate = String(rate);
+    item.textContent = rate === 1 ? '正常速度 1×' : `${rate}×`;
+    item.onclick = () => {
+      audio.playbackRate = rate;
+      closeVoiceDetailMenus();
+      more.focus();
+    };
+    menu.append(item);
+    return item;
+  });
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'voice-detail-menu-item voice-detail-menu-danger';
+  remove.setAttribute('role', 'menuitem');
+  remove.textContent = deleteLabel;
+  remove.onclick = () => {
+    closeVoiceDetailMenus();
+    onDelete();
+  };
+  menu.append(remove);
+
+  const error = document.createElement('p');
+  error.className = 'voice-detail-player-error';
+  error.setAttribute('role', 'alert');
+  error.hidden = true;
+
+  let lastPaused = null;
+  const update = () => {
+    if (audio.paused !== lastPaused) {
+      lastPaused = audio.paused;
+      play.innerHTML = icon(lastPaused ? 'play' : 'pause');
+      play.setAttribute('aria-label', lastPaused ? '播放' : '暂停');
+      play.title = play.getAttribute('aria-label');
+    }
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+    time.textContent = `${voiceDetailClock(audio.currentTime)} / ${duration ? voiceDetailClock(duration) : '--:--'}`;
+    seek.max = String(duration);
+    seek.value = String(Math.min(audio.currentTime || 0, duration));
+    seek.disabled = !duration;
+    for (const item of speeds) {
+      item.setAttribute('aria-checked', String(Number(item.dataset.rate) === audio.playbackRate));
+    }
+  };
+
+  play.onclick = () => {
+    if (!audio.paused) {
+      audio.pause();
+      return;
+    }
+    stopVoicePreview();
+    document.querySelectorAll('audio').forEach(other => { if (other !== audio) other.pause(); });
+    audio.play().catch(failure => {
+      error.textContent = `无法播放：${failure.message}`;
+      error.hidden = false;
+    });
+  };
+  seek.addEventListener('input', () => {
+    if (Number.isFinite(audio.duration)) audio.currentTime = Number(seek.value);
+  });
+  more.onclick = event => {
+    event.stopPropagation();
+    const opening = menu.hidden;
+    closeVoiceDetailMenus();
+    if (!opening) return;
+    menu.hidden = false;
+    const rect = more.getBoundingClientRect();
+    const width = menu.offsetWidth || 160;
+    const height = menu.offsetHeight || 200;
+    const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+    const below = rect.bottom + 6;
+    const top = below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below;
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    more.setAttribute('aria-expanded', 'true');
+    openVoiceDetailMenu = { menu, trigger: more };
+    menu.querySelector('.voice-detail-menu-item')?.focus();
+  };
+  menu.addEventListener('click', event => event.stopPropagation());
+  menu.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.stopPropagation();
+    closeVoiceDetailMenus();
+    more.focus();
+  });
+  for (const name of ['loadedmetadata', 'durationchange', 'timeupdate', 'play', 'pause', 'ended', 'ratechange', 'emptied']) {
+    audio.addEventListener(name, update);
+  }
+  audio.addEventListener('error', () => {
+    error.textContent = '音频加载失败。';
+    error.hidden = false;
+  });
+
+  controls.append(play, seek, time, more, menu);
+  box.append(controls, error);
+  update();
+  return box;
+}
+
+function renumberVoiceDetailRows() {
+  const referenceRows = [...$('voice-detail-rows').children];
+  referenceRows.forEach((row, index) => {
+    const cell = row.querySelector('.voice-detail-number');
+    if (cell) cell.textContent = index + 1;
+  });
+  [...$('voice-detail-assets').children].forEach((row, index) => {
+    const cell = row.querySelector('.voice-detail-number');
+    if (cell) cell.textContent = referenceRows.length + index + 1;
+  });
+  updateVoiceDetailCount();
+}
+
+function referenceIndexFor(voiceId, clip) {
+  const voice = voiceById(voiceId);
+  return (voice?.references || []).findIndex(item => item.audio === clip.audio);
+}
+
+function voiceDetailRow(spec) {
   const row = document.createElement('tr');
+  row.className = 'voice-detail-row';
 
   const number = document.createElement('td');
-  number.textContent = base + index + 1;
+  number.className = 'voice-detail-number';
 
   const audioCell = document.createElement('td');
-  const audio = document.createElement('audio');
-  audio.controls = true;
-  audio.preload = 'none';
-  audio.src = asset.audio_url;
-  audio.addEventListener('play', () => {
-    stopVoicePreview();
-    document.querySelectorAll('audio').forEach(other => {
-      if (other !== audio) other.pause();
-    });
-  });
-  audioCell.append(audio);
+  audioCell.className = 'voice-detail-audio-cell';
+  audioCell.append(voiceDetailPlayer(spec));
 
-  const text = document.createElement('td');
-  const meta = voiceDetailRowMeta('素材');
+  const typeCell = document.createElement('td');
+  typeCell.className = 'voice-detail-type';
+  const typeMain = document.createElement('div');
+  typeMain.className = 'voice-detail-type-main';
+  const tag = document.createElement('span');
+  tag.className = 'voice-detail-source';
+  tag.textContent = spec.tag;
   const name = document.createElement('span');
   name.className = 'voice-detail-asset-name';
-  name.textContent = asset.filename;
-  meta.append(name);
+  name.textContent = spec.filename;
+  name.title = spec.filename;
+  typeMain.append(tag, name);
+  const status = document.createElement('span');
+  status.className = 'voice-detail-status';
+  status.setAttribute('role', 'status');
+  const typeBody = document.createElement('div');
+  typeBody.className = 'voice-detail-type-cell';
+  typeBody.append(typeMain, status);
+  typeCell.append(typeBody);
 
+  const textCell = document.createElement('td');
+  textCell.className = 'voice-detail-text-cell';
   const editor = document.createElement('textarea');
   editor.className = 'voice-detail-editor';
-  editor.value = asset.text || '';
+  editor.value = spec.text || '';
   editor.defaultValue = editor.value;
   editor.rows = 2;
-  editor.placeholder = '待转写，可手动填写';
-  editor.setAttribute('aria-label', `第 ${base + index + 1} 条素材的对应文字`);
+  if (spec.placeholder) editor.placeholder = spec.placeholder;
+  editor.setAttribute('aria-label', spec.ariaLabel);
+  const candidate = voiceDetailCandidateBlock();
+  textCell.append(editor, candidate.box);
 
+  const actionCell = document.createElement('td');
+  actionCell.className = 'voice-detail-action-cell';
+  const stack = document.createElement('div');
+  stack.className = 'voice-detail-action-stack';
   const save = document.createElement('button');
   save.type = 'button';
   save.className = 'secondary-btn';
   save.textContent = '保存文字';
-
   const identify = document.createElement('button');
   identify.type = 'button';
   identify.className = 'secondary-btn';
   identify.textContent = '识别文字';
+  stack.append(save, identify);
+  actionCell.append(stack);
 
-  const status = document.createElement('span');
-  status.setAttribute('role', 'status');
+  editor.addEventListener('input', () => { status.textContent = '尚未保存'; });
 
-  const candidate = voiceDetailCandidateBlock();
   const identifier = voiceDetailIdentifier({
     row, editor, status, identify, save,
     adopt: candidate.adopt, close: candidate.close, box: candidate.box, text: candidate.text,
-    startTask: (force, voiceId) => api(
-      `/api/voices/${encodeURIComponent(voiceId)}/clips/${encodeURIComponent(asset.id)}/transcriptions`,
-      { method: 'POST', body: JSON.stringify({ force }) }),
-  });
-  const actions = voiceDetailActionRow(save, identify);
-
-  editor.addEventListener('input', () => {
-    status.textContent = '尚未保存';
+    startTask: spec.identifyTask,
   });
 
   save.onclick = async () => {
     if (identifier.isRunning()) {
       status.textContent = '正在识别，请稍候再保存。';
+      return;
+    }
+    if (spec.validate && !spec.validate(editor.value)) {
+      status.textContent = '文字不能为空';
       return;
     }
     const voiceId = voiceDetail.id, request = voiceDetail.request;
@@ -1600,14 +1813,10 @@ function voiceDetailAssetRow(asset, index) {
     editor.disabled = true;
     status.textContent = '保存中…';
     try {
-      const updated = await api(
-        `/api/voices/${encodeURIComponent(voiceId)}/clips/${encodeURIComponent(asset.id)}/transcript`,
-        { method: 'POST', body: JSON.stringify({ text: editor.value }) });
+      const saved = await spec.save(editor.value, voiceId);
       if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
-      editor.value = updated.text ?? '';
+      editor.value = saved.text ?? '';
       editor.defaultValue = editor.value;
-      const cached = voiceDetail.assets.find(item => item.id === asset.id);
-      if (cached) Object.assign(cached, updated);
       status.textContent = '已保存';
     } catch (error) {
       if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
@@ -1620,22 +1829,112 @@ function voiceDetailAssetRow(asset, index) {
     }
   };
 
-  text.append(meta, editor, actions, status, candidate.box);
-
-  row.append(number, audioCell, text);
-  return row;
+  row.append(number, audioCell, typeCell, textCell, actionCell);
+  voiceDetailRowState.set(row, { editor, identifier });
+  return { row, editor, identifier };
 }
 
-function appendVoiceDetailAssetRow(asset, index) {
-  $('voice-detail-assets').append(voiceDetailAssetRow(asset, index));
-  updateVoiceDetailCount();
+function openVoiceDeleteDialog({ title, description, filename, row, audioUrl, run }) {
+  const dialog = $('voice-asset-delete-dialog');
+  if (dialog.open) return;
+  $('voice-asset-delete-title').textContent = title;
+  $('voice-asset-delete-description').textContent = description;
+  $('voice-asset-delete-name').textContent = filename || '未命名音频';
+  const state = voiceDetailRowState.get(row);
+  $('voice-asset-delete-dirty').hidden = !state || state.editor.value === state.editor.defaultValue;
+  $('voice-asset-delete-error').hidden = true;
+  $('voice-asset-delete-confirm').disabled = false;
+  $('voice-asset-delete-cancel').disabled = false;
+  $('voice-asset-delete-close').disabled = false;
+  voiceDeleteContext = { row, run, audioUrl, voiceId: voiceDetail.id, request: voiceDetail.request };
+  dialog.onclose = () => {
+    voiceDeleteContext = null;
+    const target = $('voice-detail').hidden ? $('voice-search') : $('voice-detail-back');
+    if (target && target.getClientRects().length) target.focus();
+  };
+  $('voice-asset-delete-cancel').onclick = () => dialog.close();
+  $('voice-asset-delete-close').onclick = () => dialog.close();
+  dialog.showModal();
+  $('voice-asset-delete-cancel').focus();
+}
+
+function requestAssetDelete(asset, built) {
+  openVoiceDeleteDialog({
+    title: '删除素材？',
+    description: '将删除这条素材的音频及标注，无法撤销。',
+    filename: asset.filename,
+    row: built.row,
+    audioUrl: asset.audio_url,
+    run: async () => {
+      await api(
+        `/api/voices/${encodeURIComponent(voiceDetail.id)}/clips/${encodeURIComponent(asset.id)}/delete`,
+        { method: 'POST', body: '{}' });
+      const position = voiceDetail.assets.findIndex(item => item.id === asset.id);
+      if (position !== -1) voiceDetail.assets.splice(position, 1);
+      built.row.remove();
+      renumberVoiceDetailRows();
+    },
+  });
+}
+
+function requestReferenceDelete(clip, built, voiceId) {
+  openVoiceDeleteDialog({
+    title: '删除语音？',
+    description: '将删除这条语音的音频及标注，无法撤销。',
+    filename: clip.audio || '语音音频',
+    row: built.row,
+    audioUrl: clip.audio_url,
+    run: async () => {
+      const index = referenceIndexFor(voiceId, clip);
+      if (index < 0) throw new Error('这条语音已删除，请返回音色库刷新');
+      const updated = await api(`/api/voices/${encodeURIComponent(voiceId)}/references/delete`, {
+        method: 'POST',
+        body: JSON.stringify({ reference_index: index, audio: clip.audio }),
+      });
+      const position = state.voices.findIndex(item => item.id === voiceId);
+      if (position !== -1) state.voices[position] = updated;
+      built.row.remove();
+      renumberVoiceDetailRows();
+    },
+  });
+}
+
+function voiceDetailAssetRow(asset) {
+  const built = voiceDetailRow({
+    tag: '素材',
+    filename: asset.filename,
+    audioUrl: asset.audio_url,
+    preload: 'metadata',
+    text: asset.text || '',
+    placeholder: '待转写，可手动填写',
+    ariaLabel: `素材 ${asset.filename} 的对应文字`,
+    identifyTask: (force, voiceId) => api(
+      `/api/voices/${encodeURIComponent(voiceId)}/clips/${encodeURIComponent(asset.id)}/transcriptions`,
+      { method: 'POST', body: JSON.stringify({ force }) }),
+    save: async (text, voiceId) => {
+      const updated = await api(
+        `/api/voices/${encodeURIComponent(voiceId)}/clips/${encodeURIComponent(asset.id)}/transcript`,
+        { method: 'POST', body: JSON.stringify({ text }) });
+      const cached = voiceDetail.assets.find(item => item.id === asset.id);
+      if (cached) Object.assign(cached, updated);
+      return { text: updated.text ?? '' };
+    },
+    deleteLabel: '删除素材',
+    onDelete: () => requestAssetDelete(asset, built),
+  });
+  return built;
+}
+
+function appendVoiceDetailAssetRow(asset) {
+  $('voice-detail-assets').append(voiceDetailAssetRow(asset).row);
+  renumberVoiceDetailRows();
 }
 
 function renderVoiceDetailAssets() {
   const rows = $('voice-detail-assets');
   rows.replaceChildren();
-  voiceDetail.assets.forEach((asset, index) => rows.append(voiceDetailAssetRow(asset, index)));
-  updateVoiceDetailCount();
+  voiceDetail.assets.forEach(asset => rows.append(voiceDetailAssetRow(asset).row));
+  renumberVoiceDetailRows();
 }
 
 async function loadVoiceDetailAssets() {
@@ -1698,7 +1997,7 @@ async function importVoiceFiles(files) {
         if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
         voiceDetail.assets.push(asset);
         imported += 1;
-        appendVoiceDetailAssetRow(asset, voiceDetail.assets.length - 1);
+        appendVoiceDetailAssetRow(asset);
       } catch (error) {
         failed.push({ name: accepted[index].name, reason: error.message });
       }
@@ -1727,6 +2026,60 @@ $('voice-detail-import-input').onchange = () => {
   if (files.length) importVoiceFiles(files);
 };
 
+$('voice-asset-delete-dialog').oncancel = event => {
+  if (voiceDeleteBusy) event.preventDefault();
+};
+$('voice-asset-delete-confirm').onclick = async () => {
+  const context = voiceDeleteContext;
+  const dialog = $('voice-asset-delete-dialog');
+  const error = $('voice-asset-delete-error');
+  if (!context) return;
+  if (!context.row.isConnected || voiceDetail.id !== context.voiceId
+    || voiceDetail.request !== context.request) {
+    dialog.close();
+    return;
+  }
+  const state = voiceDetailRowState.get(context.row);
+  if (state?.identifier.isRunning()) {
+    error.textContent = '正在识别，请稍候再删除。';
+    error.hidden = false;
+    return;
+  }
+  if (state?.editor.disabled) {
+    error.textContent = '正在保存文字，请稍候再删除。';
+    error.hidden = false;
+    return;
+  }
+  if (voiceDetail.importing) {
+    error.textContent = '正在导入音频，请稍候再删除。';
+    error.hidden = false;
+    return;
+  }
+  const confirm = $('voice-asset-delete-confirm');
+  const cancel = $('voice-asset-delete-cancel');
+  const close = $('voice-asset-delete-close');
+  voiceDeleteBusy = true;
+  confirm.disabled = cancel.disabled = close.disabled = true;
+  error.hidden = true;
+  const released = releaseVoiceDetailAudio(context.audioUrl);
+  try {
+    await context.run();
+    voiceDeleteBusy = false;
+    dialog.close();
+    restoreVoiceDetailAudio(released);
+  } catch (failure) {
+    restoreVoiceDetailAudio(released);
+    error.textContent = `删除失败：${failure.message}`;
+    error.hidden = false;
+    voiceDeleteBusy = false;
+    confirm.disabled = cancel.disabled = close.disabled = false;
+  }
+};
+document.addEventListener('click', () => closeVoiceDetailMenus());
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeVoiceDetailMenus();
+});
+
 function openVoiceDetail(voiceId) {
   const voice = voiceById(voiceId);
   if (!voice) return;
@@ -1738,120 +2091,53 @@ function openVoiceDetail(voiceId) {
   voiceDetail.importing = false;
   setVoiceDetailImportStatus('');
   $('voice-detail-import').disabled = false;
+  const detail = $('voice-detail');
+  unloadVoiceDetailAudio(detail);
   $('voice-detail-assets').replaceChildren();
   stopVoicePreview();
-  const detail = $('voice-detail');
-  detail.querySelectorAll('audio').forEach(audio => audio.pause());
 
-  const clips = voice.references?.length ? voice.references : [voice];
+  const clips = Array.isArray(voice.references) ? voice.references : [voice];
   $('voice-detail-name').textContent = voice.name;
 
   const rows = $('voice-detail-rows');
   rows.replaceChildren();
 
   clips.forEach((clip, index) => {
-    const row = document.createElement('tr');
-
-    const number = document.createElement('td');
-    number.textContent = index + 1;
-
-    const audioCell = document.createElement('td');
-    const audio = document.createElement('audio');
-    audio.controls = true;
-    audio.preload = 'metadata';
-    audio.src = clip.audio_url;
-    audio.addEventListener('play', () => {
-      stopVoicePreview();
-      document.querySelectorAll('audio').forEach(other => {
-        if (other !== audio) other.pause();
-      });
-    });
-    audioCell.append(audio);
-
-    const text = document.createElement('td');
-    text.append(voiceDetailRowMeta('参考'));
-    const editor = document.createElement('textarea');
-    editor.className = 'voice-detail-editor';
-    editor.value = clip.transcript || '';
-    editor.defaultValue = editor.value;
-    editor.rows = 2;
-    editor.setAttribute('aria-label', `第 ${index + 1} 条语音的对应文字`);
-
-    const save = document.createElement('button');
-    save.type = 'button';
-    save.className = 'secondary-btn';
-    save.textContent = '保存文字';
-
-    const identify = document.createElement('button');
-    identify.type = 'button';
-    identify.className = 'secondary-btn';
-    identify.textContent = '识别文字';
-
-    const status = document.createElement('span');
-    status.setAttribute('role', 'status');
-
-    const candidate = voiceDetailCandidateBlock();
-    const identifier = voiceDetailIdentifier({
-      row, editor, status, identify, save,
-      adopt: candidate.adopt, close: candidate.close, box: candidate.box, text: candidate.text,
-      startTask: (force, voiceId) => api('/api/transcriptions', {
-        method: 'POST',
-        body: JSON.stringify({
-          voice_id: voiceId, reference_index: index, force, local_only: true,
-        }),
-      }),
-    });
-    const actions = voiceDetailActionRow(save, identify);
-
-    editor.addEventListener('input', () => {
-      status.textContent = '尚未保存';
-    });
-
-    save.onclick = async () => {
-      if (identifier.isRunning()) {
-        status.textContent = '正在识别，请稍候再保存。';
-        return;
-      }
-      if (!editor.value.trim()) {
-        status.textContent = '文字不能为空';
-        return;
-      }
-
-      save.disabled = true;
-      identify.disabled = true;
-      editor.disabled = true;
-      status.textContent = '保存中…';
-
-      try {
-        const updated = await api('/api/voices/transcript', {
+    const built = voiceDetailRow({
+      tag: '参考',
+      filename: clip.audio || `语音 ${index + 1}`,
+      audioUrl: clip.audio_url,
+      preload: 'metadata',
+      text: clip.transcript || '',
+      ariaLabel: `第 ${index + 1} 条语音的对应文字`,
+      validate: value => Boolean(value.trim()),
+      identifyTask: (force, voiceId) => {
+        const position = referenceIndexFor(voiceId, clip);
+        if (position < 0) return Promise.reject(new Error('这条语音已删除，请返回音色库刷新'));
+        return api('/api/transcriptions', {
           method: 'POST',
           body: JSON.stringify({
-            voice_id: voiceId,
-            reference_index: index,
-            text: editor.value,
+            voice_id: voiceId, reference_index: position, force, local_only: true,
           }),
         });
-
-        const position = state.voices.findIndex(item => item.id === voiceId);
-        if (position !== -1) state.voices[position] = updated;
-        editor.value = updated.references[index].transcript;
-        editor.defaultValue = editor.value;
-        status.textContent = '已保存';
-      } catch (error) {
-        status.textContent = `保存失败：${error.message}`;
-      } finally {
-        save.disabled = false;
-        editor.disabled = false;
-        identify.disabled = false;
-        if (!voiceDetailSaving()) setVoiceDetailNotice('');
-      }
-    };
-
-    text.append(editor, actions, status, candidate.box);
-
-    row.append(number, audioCell, text);
-    rows.append(row);
+      },
+      save: async (text, voiceId) => {
+        const position = referenceIndexFor(voiceId, clip);
+        if (position < 0) throw new Error('这条语音已删除，请返回音色库刷新');
+        const updated = await api('/api/voices/transcript', {
+          method: 'POST',
+          body: JSON.stringify({ voice_id: voiceId, reference_index: position, text }),
+        });
+        const cached = state.voices.findIndex(item => item.id === voiceId);
+        if (cached !== -1) state.voices[cached] = updated;
+        return { text: updated.references[position]?.transcript ?? text };
+      },
+      deleteLabel: '删除语音',
+      onDelete: () => requestReferenceDelete(clip, built, voiceId),
+    });
+    rows.append(built.row);
   });
+  renumberVoiceDetailRows();
 
   $('voice-detail-back').onclick = closeVoiceDetail;
   $('voice-list').hidden = true;
@@ -1863,13 +2149,13 @@ function openVoiceDetail(voiceId) {
 }
 function renderVoices() {
   stopVoicePreview();
-  const moreClips = voice => (voice.references?.length || 1) < 2 ? '' : (
+  const moreClips = voice => (voice.references?.length ?? 1) < 2 ? '' : (
     `<details class="voice-reference-clips"><summary>${translated('{count} reference clips', { count: voice.references.length })}</summary>${voice.references.slice(1).map(clip => (
       `<div class="voice-reference-clip"><p class="voice-transcript">${escapeHtml(clip.transcript)}</p><button class="icon-btn" type="button" data-preview-clip="${escapeHtml(clip.audio_url)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button><a class="voice-download" download href="${escapeHtml(clip.audio_url)}" data-i18n-title="Download" title="${escapeHtml(t('Download'))}" data-i18n-aria-label="Download" aria-label="${escapeHtml(t('Download'))}">${icon('download')}</a></div>`
     )).join('')}</details>`
   );
   const markup = state.voices.length ? state.voices.map(voice => (
-    `<div class="voice-choice"><button class="voice-pick ${state.selectedVoiceIds.has(voice.id) ? 'selected' : ''}" data-voice="${escapeHtml(voice.id)}" aria-pressed="${state.selectedVoiceIds.has(voice.id)}"><span class="voice-pick-icon">${icon('mic')}</span><span class="voice-pick-copy"><b>${escapeHtml(voice.name)}</b><small>${translated('{count} reference clips', { count: voice.references?.length || 1 })}</small></span><span class="voice-pick-check">${icon('check')}</span></button><button class="voice-preview" type="button" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div>`
+    `<div class="voice-choice"><button class="voice-pick ${state.selectedVoiceIds.has(voice.id) ? 'selected' : ''}" data-voice="${escapeHtml(voice.id)}" aria-pressed="${state.selectedVoiceIds.has(voice.id)}"><span class="voice-pick-icon">${icon('mic')}</span><span class="voice-pick-copy"><b>${escapeHtml(voice.name)}</b><small>${translated('{count} reference clips', { count: voice.references?.length ?? 1 })}</small></span><span class="voice-pick-check">${icon('check')}</span></button><button class="voice-preview" type="button" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div>`
   )).join('') : `<span class="muted">${translated('No saved voices yet')}</span>`;
   for (const id of ['voice-picks']) {
     const container = $(id);
@@ -1894,7 +2180,7 @@ function renderVoices() {
   $('voice-hint').innerHTML = state.voices.length
     ? translated('{count} saved references', { count: state.voices.length }) : translated('No saved voices yet');
   $('voice-list').innerHTML = state.voices.length ? state.voices.map(voice => (
-    `<div class="voice-card" data-voice-id="${escapeHtml(voice.id)}" data-filter="${escapeHtml(`${voice.name} ${(voice.references || [voice]).map(clip => clip.transcript).join(' ')}`.toLocaleLowerCase())}"><div class="voice-card-head"><div class="voice-card-copy"><strong title="${escapeHtml(voice.name)}">${escapeHtml(voice.name)}</strong>${(voice.references?.length || 1) < 2 ? `<small>${translated('{count} reference clips', { count: 1 })}</small>` : ''}</div><button type="button" class="icon-btn voice-tile-preview" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div><p class="voice-transcript" title="${escapeHtml(voice.transcript)}">${escapeHtml(voice.transcript)}</p>${moreClips(voice)}<div class="voice-card-actions"><button type="button" class="text-btn use-voice" data-id="${escapeHtml(voice.id)}">${translated('Use this voice')}${icon('arrow')}</button><a class="voice-download" download href="${escapeHtml(voice.audio_url)}" data-i18n-title="Download" title="${escapeHtml(t('Download'))}" data-i18n-aria-label="Download" aria-label="${escapeHtml(t('Download'))}">${icon('download')}</a></div></div>`
+    `<div class="voice-card" data-voice-id="${escapeHtml(voice.id)}" data-filter="${escapeHtml(`${voice.name} ${(voice.references || [voice]).map(clip => clip.transcript).join(' ')}`.toLocaleLowerCase())}"><div class="voice-card-head"><div class="voice-card-copy"><strong title="${escapeHtml(voice.name)}">${escapeHtml(voice.name)}</strong>${(voice.references?.length ?? 1) < 2 ? `<small>${translated('{count} reference clips', { count: 1 })}</small>` : ''}</div><button type="button" class="icon-btn voice-tile-preview" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div><p class="voice-transcript" title="${escapeHtml(voice.transcript || '')}">${escapeHtml(voice.transcript || '')}</p>${moreClips(voice)}<div class="voice-card-actions"><button type="button" class="text-btn use-voice" data-id="${escapeHtml(voice.id)}">${translated('Use this voice')}${icon('arrow')}</button>${voice.audio_url ? `<a class="voice-download" download href="${escapeHtml(voice.audio_url)}" data-i18n-title="Download" title="${escapeHtml(t('Download'))}" data-i18n-aria-label="Download" aria-label="${escapeHtml(t('Download'))}">${icon('download')}</a>` : ''}</div></div>`
   )).join('') : emptyState('mic', 'No voices saved');
   $('voice-count').textContent = state.voices.length;
   for (const card of $('voice-list').querySelectorAll('.voice-card')) {

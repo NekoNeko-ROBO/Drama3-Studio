@@ -260,7 +260,9 @@
               <tr>
                 <th scope="col">序号</th>
                 <th scope="col">音频</th>
+                <th scope="col">类型</th>
                 <th scope="col">对应文字</th>
+                <th scope="col">操作</th>
               </tr>
             </thead>
             <tbody id="voice-detail-rows"></tbody>
@@ -435,6 +437,20 @@
     <div class="studio-dialog-footer">
       <button id="voice-detail-leave-discard" class="secondary-btn" type="button">放弃修改并返回</button>
       <button id="voice-detail-leave-keep" class="primary-btn" type="button" autofocus>继续编辑</button>
+    </div>
+  </dialog>
+  <dialog id="voice-asset-delete-dialog" class="studio-dialog voice-asset-delete-dialog" aria-labelledby="voice-asset-delete-title" aria-describedby="voice-asset-delete-description">
+    <div class="studio-dialog-heading"><h2 id="voice-asset-delete-title">删除素材？</h2><button id="voice-asset-delete-close" type="button" class="icon-btn" title="取消" aria-label="取消"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <div class="studio-dialog-body">
+      <p id="voice-asset-delete-name" class="voice-asset-delete-name"></p>
+      <p id="voice-asset-delete-description">将删除这条素材的音频及标注，无法撤销。</p>
+      <p>不会删除角色或其他语音。</p>
+      <p id="voice-asset-delete-dirty" class="voice-asset-delete-dirty" hidden>此条尚未保存的修改也会丢失。</p>
+      <p id="voice-asset-delete-error" class="voice-asset-delete-error" role="alert" hidden></p>
+    </div>
+    <div class="studio-dialog-footer">
+      <button id="voice-asset-delete-confirm" class="secondary-btn voice-asset-delete-danger" type="button">确认删除</button>
+      <button id="voice-asset-delete-cancel" class="primary-btn" type="button" autofocus>取消</button>
     </div>
   </dialog>
   <script src="/assets/i18n.js"></script>
