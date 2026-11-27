@@ -946,8 +946,3 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   color: var(--muted);
   overflow-wrap: anywhere;
 }
-
-.voice-detail-asset-text {
-  margin: 0;
-  overflow-wrap: anywhere;
-}

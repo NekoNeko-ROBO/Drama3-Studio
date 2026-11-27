@@ -1408,43 +1408,92 @@ function voiceDetailUnsaved() {
     .some(editor => editor.value !== editor.defaultValue);
 }
 
+function voiceDetailAssetRow(asset, index) {
+  const base = $('voice-detail-rows').children.length;
+  const row = document.createElement('tr');
+
+  const number = document.createElement('td');
+  number.textContent = base + index + 1;
+
+  const audioCell = document.createElement('td');
+  const audio = document.createElement('audio');
+  audio.controls = true;
+  audio.preload = 'none';
+  audio.src = asset.audio_url;
+  audio.addEventListener('play', () => {
+    stopVoicePreview();
+    document.querySelectorAll('audio').forEach(other => {
+      if (other !== audio) other.pause();
+    });
+  });
+  audioCell.append(audio);
+
+  const text = document.createElement('td');
+  const meta = voiceDetailRowMeta('素材');
+  const name = document.createElement('span');
+  name.className = 'voice-detail-asset-name';
+  name.textContent = asset.filename;
+  meta.append(name);
+
+  const editor = document.createElement('textarea');
+  editor.value = asset.text || '';
+  editor.defaultValue = editor.value;
+  editor.rows = 2;
+  editor.placeholder = '待转写，可手动填写';
+  editor.setAttribute('aria-label', `第 ${base + index + 1} 条素材的对应文字`);
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'secondary-btn';
+  save.textContent = '保存文字';
+
+  const status = document.createElement('span');
+  status.setAttribute('role', 'status');
+
+  editor.addEventListener('input', () => {
+    status.textContent = '尚未保存';
+  });
+
+  save.onclick = async () => {
+    const voiceId = voiceDetail.id, request = voiceDetail.request;
+    save.disabled = true;
+    editor.disabled = true;
+    status.textContent = '保存中…';
+    try {
+      const updated = await api(
+        `/api/voices/${encodeURIComponent(voiceId)}/clips/${encodeURIComponent(asset.id)}/transcript`,
+        { method: 'POST', body: JSON.stringify({ text: editor.value }) });
+      if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+      editor.value = updated.text ?? '';
+      editor.defaultValue = editor.value;
+      const cached = voiceDetail.assets.find(item => item.id === asset.id);
+      if (cached) Object.assign(cached, updated);
+      status.textContent = '已保存';
+    } catch (error) {
+      if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+      status.textContent = `保存失败：${error.message}`;
+    } finally {
+      save.disabled = false;
+      editor.disabled = false;
+      if (!voiceDetailSaving()) setVoiceDetailNotice('');
+    }
+  };
+
+  text.append(meta, editor, save, status);
+
+  row.append(number, audioCell, text);
+  return row;
+}
+
+function appendVoiceDetailAssetRow(asset, index) {
+  $('voice-detail-assets').append(voiceDetailAssetRow(asset, index));
+  updateVoiceDetailCount();
+}
+
 function renderVoiceDetailAssets() {
   const rows = $('voice-detail-assets');
   rows.replaceChildren();
-  const base = $('voice-detail-rows').children.length;
-  voiceDetail.assets.forEach((asset, index) => {
-    const row = document.createElement('tr');
-
-    const number = document.createElement('td');
-    number.textContent = base + index + 1;
-
-    const audioCell = document.createElement('td');
-    const audio = document.createElement('audio');
-    audio.controls = true;
-    audio.preload = 'none';
-    audio.src = asset.audio_url;
-    audio.addEventListener('play', () => {
-      stopVoicePreview();
-      document.querySelectorAll('audio').forEach(other => {
-        if (other !== audio) other.pause();
-      });
-    });
-    audioCell.append(audio);
-
-    const text = document.createElement('td');
-    const meta = voiceDetailRowMeta('素材');
-    const name = document.createElement('span');
-    name.className = 'voice-detail-asset-name';
-    name.textContent = asset.filename;
-    meta.append(name);
-    const copy = document.createElement('p');
-    copy.className = 'voice-detail-asset-text';
-    copy.textContent = asset.text || '待转写';
-    text.append(meta, copy);
-
-    row.append(number, audioCell, text);
-    rows.append(row);
-  });
+  voiceDetail.assets.forEach((asset, index) => rows.append(voiceDetailAssetRow(asset, index)));
   updateVoiceDetailCount();
 }
 
@@ -1508,7 +1557,7 @@ async function importVoiceFiles(files) {
         if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
         voiceDetail.assets.push(asset);
         imported += 1;
-        renderVoiceDetailAssets();
+        appendVoiceDetailAssetRow(asset, voiceDetail.assets.length - 1);
       } catch (error) {
         failed.push({ name: accepted[index].name, reason: error.message });
       }

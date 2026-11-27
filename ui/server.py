@@ -2135,6 +2135,27 @@ class AppState:
                 raise
         return {**record, "audio_url": self._audio_url(target)}
 
+    def update_voice_dataset_transcript(self, voice_id: str, clip_id: str, text) -> dict:
+        if not isinstance(text, str):
+            raise ValueError("Transcript must be text")
+        if not isinstance(clip_id, str) or not re.fullmatch(r"[a-f0-9]{32}", clip_id):
+            raise ValueError("Invalid clip id")
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        text = text.strip()
+        with self._reference_assets_lock:
+            assets = _read_voice_dataset(folder)
+            target = next((item for item in assets if item["id"] == clip_id), None)
+            if target is None:
+                raise ValueError("Clip does not exist")
+            audio = _inside(folder / target["audio"], folder)
+            if not audio.is_file():
+                raise ValueError("Audio file is missing")
+            target["text"] = text
+            _write_voice_dataset(folder, assets)
+            return {**target, "audio_url": self._audio_url(audio)}
+
     def list_voices(self, *, retained=False):
         result = []
         removed = self.studio.removed("voices")
@@ -3353,6 +3374,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(201, STATE.save_reference_group(self._payload()))
             if path == "/api/voices/transcript":
                 return self._json(200, STATE.update_voice_transcript(self._payload()))
+            asset_transcript = re.fullmatch(
+                r"/api/voices/([^/]+)/clips/([a-f0-9]{32})/transcript", path)
+            if asset_transcript:
+                if self.headers.get_content_type() != "application/json":
+                    return self._json(415, {"error": "Expected a JSON request"})
+                payload = self._payload()
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid transcript update")
+                return self._json(200, STATE.update_voice_dataset_transcript(
+                    asset_transcript.group(1), asset_transcript.group(2),
+                    payload.get("text")))
             if path.startswith("/api/voices/") and path.endswith("/clips"):
                 if self.headers.get_content_type() != "multipart/form-data":
                     return self._json(415, {"error": "Expected a multipart request"})
