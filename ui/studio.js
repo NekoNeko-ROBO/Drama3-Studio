@@ -1532,12 +1532,8 @@
         row?.remove(); row = node('div', 'selected-library-voice'); row.dataset.libraryId = reference.libraryId;
         row.boundReference = reference;
         const name = node('strong');
-        const play = command('Preview voice', () => previewVoice(
-          voiceById(reference.libraryId), play), 'icon-btn reference-compact-play');
-        delete play.dataset.i18n; play.innerHTML = icon('play');
-        play.dataset.i18nAriaLabel = play.dataset.i18nTitle = 'Preview voice';
-        play.setAttribute('aria-label', t('Preview voice')); play.title = t('Preview voice');
-        play.disabled = !voice?.audio_url;
+        const select = command('Select audio', () => useLibraryVoice(reference.libraryId),
+          'text-btn selected-library-select');
         const clear = command('Remove audio', () => {
           stopVoicePreview(); state.selectedVoiceIds.delete(reference.libraryId);
           if (flow.referenceSelection?.voiceId === reference.libraryId) flow.referenceSelection = null;
@@ -1546,7 +1542,7 @@
         delete clear.dataset.i18n; clear.innerHTML = icon('close');
         clear.dataset.i18nAriaLabel = clear.dataset.i18nTitle = 'Remove audio';
         clear.setAttribute('aria-label', t('Remove audio')); clear.title = t('Remove audio');
-        row.append(name, play, node('span', 'selected-library-count'), clear); box.append(row);
+        row.append(name, select, node('span', 'selected-library-count'), clear); box.append(row);
       }
       const name = row.querySelector('strong');
       name.textContent = voice?.name || reference.libraryId; name.title = name.textContent;
@@ -1557,7 +1553,6 @@
         countNode.textContent = count == null ? '' : t('{count} selected', { count });
         countNode.hidden = count == null;
       }
-      row.querySelector('.reference-compact-play').disabled = !voice?.audio_url;
       existing.delete(reference.libraryId);
     }
     for (const row of existing.values()) row.remove();
@@ -1760,7 +1755,6 @@
       insert.setAttribute('aria-label', t('Add a turn for {speaker}', { speaker: speakerLabel(role) }));
       insert.title = t('Add a turn for {speaker}', { speaker: speakerLabel(role) });
       insert.disabled = flow.scene.operation?.action === 'revision';
-      row.querySelector('.speaker-play').disabled = !material.url && !material.reference.upload?.id;
       row.querySelector('.speaker-change').disabled = Boolean(flow.scene.operation) || state.jobSubmitting;
       const remove = row.querySelector('.speaker-remove');
       const removeTitle = flow.scene.roles.length > 1 ? 'Remove speaker' : 'At least one speaker is required.';
@@ -1779,22 +1773,11 @@
     delete insert.dataset.i18n;
     insert.append(node('span', 'speaker-badge', speakerLabel(role)), node('span', 'speaker-audio-name'),
       node('span', 'speaker-audio-count'));
-    const play = speakerTool('Preview voice', 'play', async () => {
-      let material = speakerAudio(role);
-      if (!material.url && material.reference.upload?.id) {
-        const reference = material.reference, original = reference.upload.id;
-        const upload = await api(`/api/reference-audio/${encodeURIComponent(original)}`);
-        if (reference.upload?.id !== original || !flow.scene.roles.includes(role)) return;
-        reference.upload = upload; material = speakerAudio(role); renderSpeakers(); saveSoon();
-      }
-      if (material.url) previewVoice({ audio_url: material.url }, play);
-    });
-    play.classList.add('speaker-play'); play.setAttribute('aria-pressed', 'false');
     const change = speakerTool('Change voice', 'switch', () => chooseSpeakerVoice(role));
     change.classList.add('speaker-change');
     const remove = speakerTool('Remove speaker', 'remove', () => removeSceneSpeaker(role));
     remove.classList.add('speaker-remove');
-    row.append(insert, play, change, remove);
+    row.append(insert, change, remove);
     return row;
   }
   function removeSceneSpeaker(role) {
@@ -1897,9 +1880,7 @@
             ? '' : ` · ${t('{count} selected', { count: selectedCount })}`}`));
         pick.setAttribute('aria-pressed', String(selected));
         if (selected) { const check = node('span', 'voice-choice-check'); check.innerHTML = icon('check'); pick.append(check); }
-        const preview = speakerTool('Preview voice', 'play', () => previewVoice(voice, preview));
-        preview.classList.add('dialogue-voice-preview'); preview.setAttribute('aria-pressed', 'false');
-        row.append(pick, preview); list.append(row);
+        row.append(pick); list.append(row);
       }
       if (!list.children.length) list.append(localized('p', 'field-help', 'No matches found'));
     }

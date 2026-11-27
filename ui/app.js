@@ -3578,7 +3578,7 @@ function renderVoices() {
     )).join('')}</details>`
   );
   const markup = state.voices.length ? state.voices.map(voice => (
-    `<div class="voice-choice"><button class="voice-pick ${state.selectedVoiceIds.has(voice.id) ? 'selected' : ''}" data-voice="${escapeHtml(voice.id)}" aria-pressed="${state.selectedVoiceIds.has(voice.id)}"><span class="voice-pick-icon">${icon('mic')}</span><span class="voice-pick-copy"><b>${escapeHtml(voice.name)}</b><small>${escapeHtml(voiceEntryLabel(voice))}</small></span><span class="voice-pick-check">${icon('check')}</span></button><button class="voice-preview" type="button" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div>`
+    `<div class="voice-choice"><button class="voice-pick ${state.selectedVoiceIds.has(voice.id) ? 'selected' : ''}" data-voice="${escapeHtml(voice.id)}" aria-pressed="${state.selectedVoiceIds.has(voice.id)}"><span class="voice-pick-icon">${icon('mic')}</span><span class="voice-pick-copy"><b>${escapeHtml(voice.name)}</b><small>${escapeHtml(voiceEntryLabel(voice))}</small></span><span class="voice-pick-check">${icon('check')}</span></button></div>`
   )).join('') : `<span class="muted">${translated('No saved voices yet')}</span>`;
   for (const id of ['voice-picks']) {
     const container = $(id);
@@ -3596,14 +3596,11 @@ function renderVoices() {
         scheduleReferencePrewarm();
       };
     });
-    container.querySelectorAll('[data-preview]').forEach(button => {
-      button.onclick = () => previewVoice(voiceById(button.dataset.preview), button);
-    });
   }
   $('voice-hint').innerHTML = state.voices.length
     ? translated('{count} saved references', { count: state.voices.length }) : translated('No saved voices yet');
   $('voice-list').innerHTML = state.voices.length ? state.voices.map(voice => (
-    `<div class="voice-card" data-voice-id="${escapeHtml(voice.id)}" data-filter="${escapeHtml(`${voice.name} ${(voice.references || [voice]).map(clip => clip.transcript).join(' ')}`.toLocaleLowerCase())}"><div class="voice-card-head"><div class="voice-card-copy"><strong title="${escapeHtml(voice.name)}">${escapeHtml(voice.name)}</strong><small>${translated('{count} audio entries', { count: voiceEntryCount(voice) })}</small></div><button type="button" class="icon-btn voice-tile-preview" data-preview="${escapeHtml(voice.id)}" data-i18n-title="Preview voice" title="${escapeHtml(t('Preview voice'))}" data-i18n-aria-label="Preview voice" aria-label="${escapeHtml(t('Preview voice'))}" aria-pressed="false">${icon('play')}</button></div><p class="voice-transcript" title="${escapeHtml(voice.transcript || '')}">${escapeHtml(voice.transcript || '')}</p>${moreClips(voice)}<div class="voice-card-actions"><button type="button" class="text-btn use-voice" data-id="${escapeHtml(voice.id)}">${translated('Use this voice')}${icon('arrow')}</button>${voice.audio_url ? `<a class="voice-download" download href="${escapeHtml(voice.audio_url)}" data-i18n-title="Download" title="${escapeHtml(t('Download'))}" data-i18n-aria-label="Download" aria-label="${escapeHtml(t('Download'))}">${icon('download')}</a>` : ''}</div></div>`
+    `<div class="voice-card" data-voice-id="${escapeHtml(voice.id)}" data-filter="${escapeHtml(`${voice.name} ${(voice.references || [voice]).map(clip => clip.transcript).join(' ')}`.toLocaleLowerCase())}"><div class="voice-card-head"><div class="voice-card-copy"><strong title="${escapeHtml(voice.name)}">${escapeHtml(voice.name)}</strong><small>${translated('{count} audio entries', { count: voiceEntryCount(voice) })}</small></div></div><p class="voice-transcript" title="${escapeHtml(voice.transcript || '')}">${escapeHtml(voice.transcript || '')}</p>${moreClips(voice)}<div class="voice-card-actions"></div></div>`
   )).join('') : emptyState('mic', 'No voices saved');
   $('voice-count').textContent = state.voices.length;
   for (const card of $('voice-list').querySelectorAll('.voice-card')) {
@@ -3612,8 +3609,9 @@ function renderVoices() {
     card.dataset.cleanupId = id;
     const manage = document.createElement('button');
     manage.type = 'button';
-    manage.className = 'text-btn';
-    manage.textContent = '管理语音';
+    manage.className = 'primary-btn voice-manage';
+    manage.textContent = t('Manage voice');
+    manage.dataset.i18n = 'Manage voice';
     manage.onclick = () => openVoiceDetail(id);
     card.querySelector('.voice-card-actions').prepend(manage);
     const checkbox = StudioCleanup.checkbox('voices', id);
@@ -3629,18 +3627,6 @@ function renderVoices() {
     card.querySelector('.voice-card-actions').append(remove);
   }
   updateVoiceSelection();
-  $('voice-list').querySelectorAll('.use-voice').forEach(button => {
-    button.onclick = () => {
-      if (window.StudioFlow) { StudioFlow.useLibraryVoice(button.dataset.id); return; }
-      clearCloneAudio();
-      state.selectedVoiceIds.clear();
-      state.selectedVoiceIds.add(button.dataset.id);
-      updateVoiceSelection(); scheduleReferencePrewarm(); view('generate'); $('saved-voice-options').open = true;
-    };
-  });
-  $('voice-list').querySelectorAll('[data-preview]').forEach(button => {
-      button.onclick = () => previewVoice(voiceById(button.dataset.preview), button);
-  });
   $('voice-list').querySelectorAll('[data-preview-clip]').forEach(button => {
     button.onclick = () => previewVoice({ audio_url: button.dataset.previewClip }, button);
   });

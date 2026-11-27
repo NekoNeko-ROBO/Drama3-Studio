@@ -904,6 +904,8 @@
     ['{count} matching', '匹配 {count} 条', '{count}件一致', '{count}개 일치'],
     ['No transcript', '无文字', '書き起こしなし', '텍스트 없음'],
     ['Loading audio…', '正在读取音频…', '音声を読み込み中…', '오디오 불러오는 중…'],
+    ['Select audio', '选择音频', '音声を選択', '오디오 선택'],
+    ['Manage voice', '管理语音', '音声を管理', '음성 관리'],
   ];
   const locales = ['zh-CN', 'en', 'ja', 'ko'];
   const index = { en: 0, 'zh-CN': 1, ja: 2, ko: 3 };
