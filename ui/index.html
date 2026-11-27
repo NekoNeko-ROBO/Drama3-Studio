@@ -250,7 +250,10 @@
             <span id="voice-detail-save-notice" class="voice-detail-save-notice" role="status" hidden></span>
             <h2 id="voice-detail-name"></h2>
             <span id="voice-detail-count" class="badge">0</span>
+            <button id="voice-detail-import" class="secondary-btn" type="button">导入音频</button>
+            <input id="voice-detail-import-input" type="file" accept=".wav,.flac,.mp3,.ogg,.m4a,audio/wav,audio/flac,audio/mpeg,audio/ogg,audio/mp4" multiple hidden>
           </div>
+          <p id="voice-detail-import-status" class="voice-detail-import-status" role="status" hidden></p>
 
           <table class="voice-detail-table">
             <thead>
@@ -261,6 +264,7 @@
               </tr>
             </thead>
             <tbody id="voice-detail-rows"></tbody>
+            <tbody id="voice-detail-assets"></tbody>
           </table>
         </div>
       </section>

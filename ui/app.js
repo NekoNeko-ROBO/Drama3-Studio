@@ -1319,6 +1319,10 @@ function voiceDetailSaving() {
   return [...$('voice-detail').querySelectorAll('textarea')].some(editor => editor.disabled);
 }
 
+let voiceDetail = { id: null, request: 0, assets: [], importing: false };
+const VOICE_IMPORT_LIMIT = 128 * 1024 * 1024;
+const VOICE_IMPORT_SUFFIXES = ['.wav', '.flac', '.mp3', '.ogg', '.m4a'];
+
 function setVoiceDetailNotice(text) {
   const notice = $('voice-detail-save-notice');
   notice.textContent = text;
@@ -1327,6 +1331,9 @@ function setVoiceDetailNotice(text) {
 
 function leaveVoiceDetail() {
   setVoiceDetailNotice('');
+  voiceDetail.id = null;
+  voiceDetail.assets = [];
+  setVoiceDetailImportStatus('');
   stopVoicePreview();
   $('voice-detail').querySelectorAll('audio').forEach(audio => audio.pause());
   $('voice-detail').hidden = true;
@@ -1358,6 +1365,10 @@ function openVoiceDetailLeaveDialog() {
 }
 
 function closeVoiceDetail() {
+  if (voiceDetail.importing) {
+    setVoiceDetailNotice('正在导入音频，请稍候再返回。');
+    return;
+  }
   if (voiceDetailSaving()) {
     setVoiceDetailNotice('正在保存，请稍候再返回。');
     return;
@@ -1371,18 +1382,179 @@ function closeVoiceDetail() {
   leaveVoiceDetail();
 }
 
+function setVoiceDetailImportStatus(text) {
+  const status = $('voice-detail-import-status');
+  status.textContent = text;
+  status.hidden = !text;
+}
+
+function updateVoiceDetailCount() {
+  const total = $('voice-detail-rows').children.length + voiceDetail.assets.length;
+  $('voice-detail-count').textContent = `${total} 条语音`;
+}
+
+function voiceDetailRowMeta(label) {
+  const meta = document.createElement('p');
+  meta.className = 'voice-detail-row-meta';
+  const tag = document.createElement('span');
+  tag.className = 'voice-detail-source';
+  tag.textContent = label;
+  meta.append(tag);
+  return meta;
+}
+
+function voiceDetailUnsaved() {
+  return [...$('voice-detail').querySelectorAll('textarea')]
+    .some(editor => editor.value !== editor.defaultValue);
+}
+
+function renderVoiceDetailAssets() {
+  const rows = $('voice-detail-assets');
+  rows.replaceChildren();
+  const base = $('voice-detail-rows').children.length;
+  voiceDetail.assets.forEach((asset, index) => {
+    const row = document.createElement('tr');
+
+    const number = document.createElement('td');
+    number.textContent = base + index + 1;
+
+    const audioCell = document.createElement('td');
+    const audio = document.createElement('audio');
+    audio.controls = true;
+    audio.preload = 'none';
+    audio.src = asset.audio_url;
+    audio.addEventListener('play', () => {
+      stopVoicePreview();
+      document.querySelectorAll('audio').forEach(other => {
+        if (other !== audio) other.pause();
+      });
+    });
+    audioCell.append(audio);
+
+    const text = document.createElement('td');
+    const meta = voiceDetailRowMeta('素材');
+    const name = document.createElement('span');
+    name.className = 'voice-detail-asset-name';
+    name.textContent = asset.filename;
+    meta.append(name);
+    const copy = document.createElement('p');
+    copy.className = 'voice-detail-asset-text';
+    copy.textContent = asset.text || '待转写';
+    text.append(meta, copy);
+
+    row.append(number, audioCell, text);
+    rows.append(row);
+  });
+  updateVoiceDetailCount();
+}
+
+async function loadVoiceDetailAssets() {
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  try {
+    const data = await api(`/api/voices/${encodeURIComponent(voiceId)}/clips`);
+    if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+    voiceDetail.assets = data.assets || [];
+    renderVoiceDetailAssets();
+  } catch (error) {
+    if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+    setVoiceDetailImportStatus(`读取素材失败：${error.message}`);
+  }
+}
+
+async function uploadVoiceAsset(voiceId, file) {
+  const data = new FormData();
+  data.append('audio', file, file.name);
+  const response = await fetch(`/api/voices/${encodeURIComponent(voiceId)}/clips`, {
+    method: 'POST', body: data,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+
+async function importVoiceFiles(files) {
+  if (!voiceDetail.id || voiceDetail.importing) return;
+  if (voiceDetailSaving()) {
+    setVoiceDetailImportStatus('正在保存文字，请稍候再导入。');
+    return;
+  }
+  if (voiceDetailUnsaved()) {
+    setVoiceDetailImportStatus('有尚未保存的文字修改，请先保存或处理修改后再导入。');
+    return;
+  }
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  const accepted = [], failed = [];
+  for (const file of files) {
+    const suffix = file.name.includes('.')
+      ? file.name.slice(file.name.lastIndexOf('.')).toLowerCase() : '';
+    if (!VOICE_IMPORT_SUFFIXES.includes(suffix)) failed.push({ name: file.name, reason: '格式不支持' });
+    else if (!file.size) failed.push({ name: file.name, reason: '文件为空' });
+    else if (file.size > VOICE_IMPORT_LIMIT) failed.push({ name: file.name, reason: '超过 128 MiB 请求体上限' });
+    else accepted.push(file);
+  }
+  if (!accepted.length) {
+    setVoiceDetailImportStatus(`未导入任何文件：${failed.map(item => `${item.name}（${item.reason}）`).join('；')}`);
+    return;
+  }
+  voiceDetail.importing = true;
+  $('voice-detail-import').disabled = true;
+  let imported = 0;
+  try {
+    for (let index = 0; index < accepted.length; index++) {
+      if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+      setVoiceDetailImportStatus(`正在导入 ${index + 1}/${accepted.length}`);
+      try {
+        const asset = await uploadVoiceAsset(voiceId, accepted[index]);
+        if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+        voiceDetail.assets.push(asset);
+        imported += 1;
+        renderVoiceDetailAssets();
+      } catch (error) {
+        failed.push({ name: accepted[index].name, reason: error.message });
+      }
+    }
+  } finally {
+    voiceDetail.importing = false;
+    if (voiceDetail.id === voiceId && voiceDetail.request === request) {
+      $('voice-detail-import').disabled = false;
+      const summary = [`成功 ${imported} 条`];
+      if (failed.length) {
+        summary.push(`失败 ${failed.length} 条：${failed.map(item => `${item.name}（${item.reason}）`).join('；')}`);
+      }
+      setVoiceDetailImportStatus(`导入结束：${summary.join('，')}`);
+    }
+  }
+}
+
+$('voice-detail-import').onclick = () => {
+  if (voiceDetail.importing) return;
+  const picker = $('voice-detail-import-input');
+  picker.value = '';
+  picker.click();
+};
+$('voice-detail-import-input').onchange = () => {
+  const files = [...$('voice-detail-import-input').files];
+  if (files.length) importVoiceFiles(files);
+};
+
 function openVoiceDetail(voiceId) {
   const voice = voiceById(voiceId);
   if (!voice) return;
 
   setVoiceDetailNotice('');
+  voiceDetail.id = voiceId;
+  voiceDetail.request += 1;
+  voiceDetail.assets = [];
+  voiceDetail.importing = false;
+  setVoiceDetailImportStatus('');
+  $('voice-detail-import').disabled = false;
+  $('voice-detail-assets').replaceChildren();
   stopVoicePreview();
   const detail = $('voice-detail');
   detail.querySelectorAll('audio').forEach(audio => audio.pause());
 
   const clips = voice.references?.length ? voice.references : [voice];
   $('voice-detail-name').textContent = voice.name;
-  $('voice-detail-count').textContent = `${clips.length} 条语音`;
 
   const rows = $('voice-detail-rows');
   rows.replaceChildren();
@@ -1407,6 +1579,7 @@ function openVoiceDetail(voiceId) {
     audioCell.append(audio);
 
     const text = document.createElement('td');
+    text.append(voiceDetailRowMeta('参考'));
     const editor = document.createElement('textarea');
     editor.value = clip.transcript || '';
     editor.defaultValue = editor.value;
@@ -1470,6 +1643,8 @@ function openVoiceDetail(voiceId) {
   $('voice-search-empty').hidden = true;
   document.querySelector('#view-voices .voice-library-toolbar').hidden = true;
   detail.hidden = false;
+  updateVoiceDetailCount();
+  loadVoiceDetailAssets();
 }
 function renderVoices() {
   stopVoicePreview();

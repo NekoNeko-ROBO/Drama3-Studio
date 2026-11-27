@@ -117,6 +117,55 @@ def _voice_id(value):
     return value
 
 
+# Voice-library dataset assets live beside a voice and never change voice.json.
+VOICE_CLIP_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a")
+
+
+def _voice_dataset_file(folder: Path) -> Path:
+    return folder / "dataset.json"
+
+
+def _read_voice_dataset(folder: Path) -> list[dict]:
+    path = _voice_dataset_file(folder)
+    if not path.is_file():
+        return []
+    value = json.loads(path.read_text(encoding="utf-8"))
+    assets = value.get("assets") if isinstance(value, dict) else None
+    if not isinstance(assets, list):
+        return []
+    result = []
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        identifier, audio = item.get("id"), item.get("audio")
+        if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier):
+            continue
+        if not isinstance(audio, str) or not audio.startswith("clips/"):
+            continue
+        text = item.get("text")
+        result.append({
+            "id": identifier,
+            "filename": str(item.get("filename") or "clip"),
+            "audio": audio,
+            "text": text if isinstance(text, str) else "",
+            "bytes": item.get("bytes") if isinstance(item.get("bytes"), int) else 0,
+            "created_at": item.get("created_at") if isinstance(item.get("created_at"), (int, float)) else 0,
+        })
+    return result
+
+
+def _write_voice_dataset(folder: Path, assets: list[dict]):
+    path = _voice_dataset_file(folder)
+    temporary = path.with_name(f"dataset-{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"schema": 1, "assets": assets}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def inspect_model(path):
     return inspect_gguf(path) if is_gguf(path) else inspect_checkpoint(path)
 
@@ -2049,6 +2098,43 @@ class AppState:
 
             return self._voice(voice_id)
 
+    def voice_dataset(self, voice_id: str) -> dict:
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        assets = []
+        for item in _read_voice_dataset(folder):
+            audio = _inside(folder / item["audio"], folder)
+            if not audio.is_file():
+                continue
+            assets.append({**item, "audio_url": self._audio_url(audio)})
+        return {"voice_id": voice_id, "assets": assets}
+
+    def add_voice_dataset_asset(self, voice_id: str, filename, data: bytes) -> dict:
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        name = Path(str(filename or "")).name.strip()[:160]
+        suffix = Path(name).suffix.lower()
+        if suffix not in VOICE_CLIP_SUFFIXES:
+            raise ValueError("Choose a WAV, FLAC, MP3, OGG or M4A file")
+        if len(data) < 32:
+            raise ValueError("Audio file is empty")
+        asset_id = uuid.uuid4().hex
+        relative = f"clips/{asset_id}{suffix}"
+        target = _inside(folder / relative, folder)
+        with self._reference_assets_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            try:
+                record = {"id": asset_id, "filename": name or "clip", "audio": relative,
+                          "text": "", "bytes": len(data), "created_at": time.time()}
+                _write_voice_dataset(folder, [*_read_voice_dataset(folder), record])
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+        return {**record, "audio_url": self._audio_url(target)}
+
     def list_voices(self, *, retained=False):
         result = []
         removed = self.studio.removed("voices")
@@ -3145,6 +3231,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/voices":
                 return self._json(200, {"voices": STATE.list_voices(),
                                         "retained": STATE.list_voices(retained=True)})
+            if path.startswith("/api/voices/") and path.endswith("/clips"):
+                return self._json(200, STATE.voice_dataset(
+                    path.removeprefix("/api/voices/").removesuffix("/clips")))
             if path.startswith("/api/reference-prewarm/"):
                 task_id = path.removeprefix("/api/reference-prewarm/")
                 task = STATE.reference_prewarm(task_id)
@@ -3264,6 +3353,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(201, STATE.save_reference_group(self._payload()))
             if path == "/api/voices/transcript":
                 return self._json(200, STATE.update_voice_transcript(self._payload()))
+            if path.startswith("/api/voices/") and path.endswith("/clips"):
+                if self.headers.get_content_type() != "multipart/form-data":
+                    return self._json(415, {"error": "Expected a multipart request"})
+                form = self._multipart_payload()
+                audio = form.get("audio")
+                if not isinstance(audio, dict):
+                    raise ValueError("An audio file is required")
+                return self._json(201, STATE.add_voice_dataset_asset(
+                    path.removeprefix("/api/voices/").removesuffix("/clips"),
+                    audio.get("filename"), audio["data"]))
             if path == "/api/studio/prepare-restore":
                 return self._json(200, STATE.prepare_version_restore(self._payload()))
             if path == "/api/studio/context-status":

@@ -917,3 +917,37 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
 .voice-detail-leave-dialog {
   background: #fff;
 }
+
+/* 语音详情：素材导入状态与素材行（本模块新增） */
+.voice-detail-import-status {
+  margin: -12px 0 16px;
+  font-size: 13px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.voice-detail-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.voice-detail-source {
+  padding: 1px 6px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.voice-detail-asset-name {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.voice-detail-asset-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
