@@ -1408,6 +1408,125 @@ function voiceDetailUnsaved() {
     .some(editor => editor.value !== editor.defaultValue);
 }
 
+function voiceDetailActionRow(...buttons) {
+  const actions = document.createElement('div');
+  actions.className = 'voice-detail-row-actions';
+  actions.append(...buttons);
+  return actions;
+}
+
+function voiceDetailCandidateBlock() {
+  const box = document.createElement('div');
+  box.className = 'voice-detail-candidate';
+  box.hidden = true;
+  const text = document.createElement('p');
+  text.className = 'voice-detail-candidate-text';
+  const actions = document.createElement('div');
+  actions.className = 'voice-detail-candidate-actions';
+  const adopt = document.createElement('button');
+  adopt.type = 'button';
+  adopt.className = 'secondary-btn';
+  adopt.textContent = '采用识别结果';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'text-btn';
+  close.textContent = '关闭';
+  actions.append(adopt, close);
+  box.append(text, actions);
+  return { box, text, adopt, close };
+}
+
+function voiceDetailIdentifier({ row, editor, status, identify, save, adopt, close, box, text, startTask }) {
+  let running = false, session = null, candidate = '', hasCandidate = false;
+  const label = () => { identify.textContent = hasCandidate ? '重新识别' : '识别文字'; };
+  identify.textContent = '识别文字';
+  identify.onclick = async () => {
+    if (editor.disabled) {
+      status.textContent = '正在保存文字，请稍候再识别。';
+      return;
+    }
+    if (running) return;
+    const voiceId = voiceDetail.id, request = voiceDetail.request;
+    const started = { voiceId, request, taskId: null, timer: null };
+    session = started;
+    const current = () => row.isConnected && voiceDetail.id === voiceId
+      && voiceDetail.request === request && session === started;
+    running = true;
+    identify.disabled = true;
+    save.disabled = true;
+    box.hidden = true;
+    status.textContent = '排队中…';
+    const finish = () => {
+      if (started.timer) clearTimeout(started.timer);
+      started.timer = null;
+      if (!current()) return;
+      running = false;
+      identify.disabled = false;
+      save.disabled = false;
+      if (session === started) session = null;
+      label();
+    };
+    const poll = async () => {
+      if (!current()) return;
+      try {
+        const task = await api(`/api/transcriptions/${encodeURIComponent(started.taskId)}`);
+        if (!current()) return;
+        if (task.status === 'complete') {
+          const value = task.result?.text || '';
+          if (!value) throw new Error('识别结果为空');
+          candidate = value;
+          text.textContent = value;
+          box.hidden = false;
+          hasCandidate = true;
+          status.textContent = '识别完成，请校对后采用。';
+          finish();
+          return;
+        }
+        if (task.status === 'skipped') {
+          status.textContent = task.reason === 'model_unavailable'
+            ? '本机未安装识别模型（checkpoints/Qwen3-ASR-0.6B-hf），无法识别。'
+            : '识别已跳过，可稍后重试。';
+          finish();
+          return;
+        }
+        if (task.status === 'error') {
+          status.textContent = `识别失败：${task.error || '未知错误'}`;
+          finish();
+          return;
+        }
+        status.textContent = task.status === 'running' ? '识别中…' : '排队中…';
+        started.timer = setTimeout(poll, 1200);
+      } catch (error) {
+        if (!current()) return;
+        status.textContent = `识别失败：${error.message}`;
+        finish();
+      }
+    };
+    try {
+      const task = await startTask(hasCandidate, voiceId);
+      if (!current()) return;
+      started.taskId = task.id;
+      poll();
+    } catch (error) {
+      if (!current()) return;
+      status.textContent = `识别失败：${error.message}`;
+      finish();
+    }
+  };
+  adopt.onclick = () => {
+    if (editor.disabled) {
+      status.textContent = '正在保存文字，请稍候再采用。';
+      return;
+    }
+    if (!candidate) return;
+    editor.value = candidate;
+    box.hidden = true;
+    status.textContent = '已填入识别结果，尚未保存。';
+  };
+  close.onclick = () => { box.hidden = true; };
+  return { isRunning: () => running };
+}
+
 function voiceDetailAssetRow(asset, index) {
   const base = $('voice-detail-rows').children.length;
   const row = document.createElement('tr');
@@ -1436,6 +1555,7 @@ function voiceDetailAssetRow(asset, index) {
   meta.append(name);
 
   const editor = document.createElement('textarea');
+  editor.className = 'voice-detail-editor';
   editor.value = asset.text || '';
   editor.defaultValue = editor.value;
   editor.rows = 2;
@@ -1447,16 +1567,36 @@ function voiceDetailAssetRow(asset, index) {
   save.className = 'secondary-btn';
   save.textContent = '保存文字';
 
+  const identify = document.createElement('button');
+  identify.type = 'button';
+  identify.className = 'secondary-btn';
+  identify.textContent = '识别文字';
+
   const status = document.createElement('span');
   status.setAttribute('role', 'status');
+
+  const candidate = voiceDetailCandidateBlock();
+  const identifier = voiceDetailIdentifier({
+    row, editor, status, identify, save,
+    adopt: candidate.adopt, close: candidate.close, box: candidate.box, text: candidate.text,
+    startTask: (force, voiceId) => api(
+      `/api/voices/${encodeURIComponent(voiceId)}/clips/${encodeURIComponent(asset.id)}/transcriptions`,
+      { method: 'POST', body: JSON.stringify({ force }) }),
+  });
+  const actions = voiceDetailActionRow(save, identify);
 
   editor.addEventListener('input', () => {
     status.textContent = '尚未保存';
   });
 
   save.onclick = async () => {
+    if (identifier.isRunning()) {
+      status.textContent = '正在识别，请稍候再保存。';
+      return;
+    }
     const voiceId = voiceDetail.id, request = voiceDetail.request;
     save.disabled = true;
+    identify.disabled = true;
     editor.disabled = true;
     status.textContent = '保存中…';
     try {
@@ -1475,11 +1615,12 @@ function voiceDetailAssetRow(asset, index) {
     } finally {
       save.disabled = false;
       editor.disabled = false;
+      identify.disabled = false;
       if (!voiceDetailSaving()) setVoiceDetailNotice('');
     }
   };
 
-  text.append(meta, editor, save, status);
+  text.append(meta, editor, actions, status, candidate.box);
 
   row.append(number, audioCell, text);
   return row;
@@ -1630,6 +1771,7 @@ function openVoiceDetail(voiceId) {
     const text = document.createElement('td');
     text.append(voiceDetailRowMeta('参考'));
     const editor = document.createElement('textarea');
+    editor.className = 'voice-detail-editor';
     editor.value = clip.transcript || '';
     editor.defaultValue = editor.value;
     editor.rows = 2;
@@ -1640,20 +1782,43 @@ function openVoiceDetail(voiceId) {
     save.className = 'secondary-btn';
     save.textContent = '保存文字';
 
+    const identify = document.createElement('button');
+    identify.type = 'button';
+    identify.className = 'secondary-btn';
+    identify.textContent = '识别文字';
+
     const status = document.createElement('span');
     status.setAttribute('role', 'status');
+
+    const candidate = voiceDetailCandidateBlock();
+    const identifier = voiceDetailIdentifier({
+      row, editor, status, identify, save,
+      adopt: candidate.adopt, close: candidate.close, box: candidate.box, text: candidate.text,
+      startTask: (force, voiceId) => api('/api/transcriptions', {
+        method: 'POST',
+        body: JSON.stringify({
+          voice_id: voiceId, reference_index: index, force, local_only: true,
+        }),
+      }),
+    });
+    const actions = voiceDetailActionRow(save, identify);
 
     editor.addEventListener('input', () => {
       status.textContent = '尚未保存';
     });
 
     save.onclick = async () => {
+      if (identifier.isRunning()) {
+        status.textContent = '正在识别，请稍候再保存。';
+        return;
+      }
       if (!editor.value.trim()) {
         status.textContent = '文字不能为空';
         return;
       }
 
       save.disabled = true;
+      identify.disabled = true;
       editor.disabled = true;
       status.textContent = '保存中…';
 
@@ -1677,11 +1842,12 @@ function openVoiceDetail(voiceId) {
       } finally {
         save.disabled = false;
         editor.disabled = false;
+        identify.disabled = false;
         if (!voiceDetailSaving()) setVoiceDetailNotice('');
       }
     };
 
-    text.append(editor, save, status);
+    text.append(editor, actions, status, candidate.box);
 
     row.append(number, audioCell, text);
     rows.append(row);

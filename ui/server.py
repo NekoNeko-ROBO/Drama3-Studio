@@ -2156,6 +2156,25 @@ class AppState:
             _write_voice_dataset(folder, assets)
             return {**target, "audio_url": self._audio_url(audio)}
 
+    def start_voice_asset_transcription(self, voice_id: str, clip_id: str, force=False) -> dict:
+        if not isinstance(force, bool):
+            raise ValueError("Invalid transcription retry flag")
+        if not isinstance(clip_id, str) or not re.fullmatch(r"[a-f0-9]{32}", clip_id):
+            raise ValueError("Invalid clip id")
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        with self._reference_assets_lock:
+            target = next((item for item in _read_voice_dataset(folder) if item["id"] == clip_id), None)
+            if target is None:
+                raise ValueError("Clip does not exist")
+            audio = _inside(folder / target["audio"], folder)
+            if not audio.is_file():
+                raise ValueError("Audio file is missing")
+        with self._engine_lock:
+            self.asr.executor = self._executor
+            return self.asr.start(audio, force=force, local_only=True)
+
     def list_voices(self, *, retained=False):
         result = []
         removed = self.studio.removed("voices")
@@ -3385,6 +3404,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, STATE.update_voice_dataset_transcript(
                     asset_transcript.group(1), asset_transcript.group(2),
                     payload.get("text")))
+            asset_transcription = re.fullmatch(
+                r"/api/voices/([^/]+)/clips/([a-f0-9]{32})/transcriptions", path)
+            if asset_transcription:
+                payload = self._payload()
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid transcription request")
+                return self._json(202, STATE.start_voice_asset_transcription(
+                    asset_transcription.group(1), asset_transcription.group(2),
+                    payload.get("force", False)))
             if path.startswith("/api/voices/") and path.endswith("/clips"):
                 if self.headers.get_content_type() != "multipart/form-data":
                     return self._json(415, {"error": "Expected a multipart request"})

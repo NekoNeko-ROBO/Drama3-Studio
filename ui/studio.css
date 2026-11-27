@@ -946,3 +946,52 @@ html, body, button, input, textarea, select, h1, h2, h3, strong { letter-spacing
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+
+/* 语音详情：素材识别结果（本模块新增） */
+.voice-detail-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.voice-detail-candidate {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-control);
+  background: #fff;
+}
+
+.voice-detail-candidate-text {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.voice-detail-candidate-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 语音详情：统一文字编辑框（复用输入框 tokens，仅作用于详情） */
+#voice-detail .voice-detail-table textarea.voice-detail-editor {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fbfcfd;
+  font: inherit;
+  transition: border-color .12s ease, box-shadow .12s ease, background-color .12s ease;
+}
+
+#voice-detail .voice-detail-table textarea.voice-detail-editor:hover:enabled {
+  border-color: var(--line-hover);
+}
+
+#voice-detail .voice-detail-table textarea.voice-detail-editor:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: #fff;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
