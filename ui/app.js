@@ -1331,6 +1331,7 @@ function setVoiceDetailNotice(text) {
 
 function leaveVoiceDetail() {
   setVoiceDetailNotice('');
+  resetVoiceDetailTags();
   voiceDetail.id = null;
   voiceDetail.assets = [];
   voiceDetailSelection.clear();
@@ -1390,6 +1391,10 @@ function closeVoiceDetail() {
   }
   if (voiceDetail.importing) {
     setVoiceDetailNotice('正在导入音频，请稍候再返回。');
+    return;
+  }
+  if (voiceDetailTags.busy) {
+    setVoiceDetailNotice('正在保存标签，请稍候再返回。');
     return;
   }
   if (voiceDetailSaving()) {
@@ -1605,6 +1610,736 @@ function voiceDetailIdentifier({ row, editor, status, identify, save, adopt, clo
 
 const voiceDetailRowState = new WeakMap();
 const VOICE_PLAYER_RATES = [1, 0.5, 1.5, 2];
+
+const VOICE_TAG_NONE = '__none__';
+const DEFAULT_VOICE_TAG_COLOR = '#c64a2e';
+const voiceDetailTags = {
+  voiceId: null, list: [], bindings: new Map(), loading: false, request: 0, busy: 0,
+};
+const voiceDetailFilter = { query: '', tags: new Set(), pending: false };
+let openVoiceTagPopoverState = null;
+let openVoiceTagFilterState = null;
+const voiceTagDialogState = { editing: null, original: null, deleteId: null, returnFocus: null };
+
+function voiceDetailBusyBatches() {
+  return voiceDetailBatch.running || voiceDetailSaveBatch.running || voiceDetailDeleteBatch.running;
+}
+
+function normalizeVoiceTagText(value) {
+  return String(value ?? '').normalize('NFKC').toLowerCase();
+}
+
+function hexToHsl(hex) {
+  const value = /^#[0-9a-f]{6}$/i.test(String(hex || ''))
+    ? String(hex).slice(1) : DEFAULT_VOICE_TAG_COLOR.slice(1);
+  const [r, g, b] = [0, 2, 4].map(index => parseInt(value.slice(index, index + 2), 16) / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min;
+  const lightness = (max + min) / 2;
+  let hue = 0, saturation = 0;
+  if (delta) {
+    saturation = delta / (1 - Math.abs(2 * lightness - 1));
+    if (max === r) hue = ((g - b) / delta) % 6;
+    else if (max === g) hue = (b - r) / delta + 2;
+    else hue = (r - g) / delta + 4;
+    hue *= 60;
+    if (hue < 0) hue += 360;
+  }
+  return [hue, saturation * 100];
+}
+
+// One validated hex color becomes three numeric CSS values; tag names never
+// reach a style attribute or innerHTML, so custom colors cannot inject CSS.
+function voiceTagPalette(color) {
+  const hex = /^#[0-9a-f]{6}$/i.test(String(color || ''))
+    ? String(color).toLowerCase() : DEFAULT_VOICE_TAG_COLOR;
+  if (hex === DEFAULT_VOICE_TAG_COLOR) {
+    return { bg: 'var(--accent-soft)', border: 'var(--accent-line)', text: 'var(--accent)' };
+  }
+  const [hue, saturation] = hexToHsl(hex);
+  if (saturation < 8) {
+    return { bg: '#f3f4f6', border: '#d5dae1', text: '#4a5563' };
+  }
+  const round = value => Math.round(value);
+  return {
+    bg: `hsl(${round(hue)} ${round(Math.min(70, Math.max(26, saturation * 0.7)))}% 96%)`,
+    border: `hsl(${round(hue)} ${round(Math.min(80, Math.max(34, saturation * 0.9)))}% 82%)`,
+    text: `hsl(${round(hue)} ${round(Math.min(85, Math.max(38, saturation)))}% 33%)`,
+  };
+}
+
+function styleVoiceTagChip(node, color) {
+  const palette = voiceTagPalette(color);
+  node.style.setProperty('--tag-bg', palette.bg);
+  node.style.setProperty('--tag-border', palette.border);
+  node.style.setProperty('--tag-text', palette.text);
+}
+
+function voiceTagChip(tag) {
+  const chip = document.createElement('span');
+  chip.className = 'voice-detail-tag-chip';
+  if (tag) {
+    chip.textContent = tag.name;
+    chip.title = tag.name;
+    styleVoiceTagChip(chip, tag.color);
+  } else {
+    chip.textContent = '素材';
+    chip.classList.add('is-placeholder');
+  }
+  return chip;
+}
+
+function voiceTagById(id) {
+  return voiceDetailTags.list.find(tag => tag.id === id) || null;
+}
+
+function setVoiceDetailTagStatus(text) {
+  const node = $('voice-detail-tag-status');
+  node.textContent = text || '';
+  node.hidden = !text;
+}
+
+function voiceDetailTagControl({ row, key, filename }) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'voice-detail-tags';
+  button.setAttribute('aria-haspopup', 'dialog');
+  button.setAttribute('aria-expanded', 'false');
+  const list = document.createElement('span');
+  list.className = 'voice-detail-tag-list';
+  const plus = document.createElement('span');
+  plus.className = 'voice-detail-tag-plus';
+  plus.textContent = '＋';
+  plus.setAttribute('aria-hidden', 'true');
+  button.append(list, plus);
+  const render = () => {
+    const ids = voiceDetailTags.bindings.get(key) || [];
+    const tags = ids.map(voiceTagById).filter(Boolean);
+    list.replaceChildren();
+    if (!tags.length) {
+      list.append(voiceTagChip(null));
+      button.title = '点击设置标签';
+      button.setAttribute('aria-label', `${filename}：未设置标签，点击设置`);
+    } else {
+      for (const tag of tags) list.append(voiceTagChip(tag));
+      const names = tags.map(tag => tag.name).join('、');
+      button.title = `标签：${names}`;
+      button.setAttribute('aria-label', `${filename}：标签 ${names}，点击编辑`);
+    }
+  };
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    if (voiceDetailBusyBatches()) {
+      setVoiceDetailTagStatus('批量操作进行中，请稍候再设置标签。');
+      return;
+    }
+    toggleVoiceTagPopover(row, key, button, filename);
+  });
+  render();
+  return { button, render, setLocked: locked => { button.disabled = locked; } };
+}
+
+function voiceDetailRowMatches(state) {
+  const selected = voiceDetailFilter.tags;
+  if (selected.size) {
+    const ids = voiceDetailTags.bindings.get(state.key) || [];
+    const any = ids.some(id => selected.has(id));
+    const noTags = ids.length === 0 && selected.has(VOICE_TAG_NONE);
+    if (!any && !noTags) return false;
+  }
+  const query = voiceDetailFilter.query;
+  if (!query) return true;
+  return normalizeVoiceTagText(state.filename).includes(query)
+    || normalizeVoiceTagText(state.editor.value).includes(query);
+}
+
+function applyVoiceDetailFilter() {
+  if (voiceDetailBusyBatches()) return;
+  const rows = voiceDetailRowList();
+  let matched = 0;
+  for (const row of rows) {
+    const state = voiceDetailRowState.get(row);
+    if (!state) continue;
+    const visible = voiceDetailRowMatches(state);
+    row.hidden = !visible;
+    if (visible) matched += 1;
+  }
+  const total = rows.length;
+  $('voice-detail-match-count').textContent = `匹配 ${matched} / 共 ${total} 条`;
+  const empty = $('voice-detail-no-match');
+  empty.hidden = total === 0 || matched > 0;
+  empty.textContent = total
+    ? `没有匹配的语音（共 ${total} 条，可清除搜索或标签筛选查看全部）` : '没有匹配的语音';
+  refreshVoiceDetailSelection();
+}
+
+function refreshVoiceTagFilterButton() {
+  const count = voiceDetailFilter.tags.size;
+  $('voice-detail-tag-filter').textContent = count ? `标签筛选（${count}）` : '标签筛选';
+  $('voice-detail-filter-clear').hidden = !count && !$('voice-detail-search').value.trim();
+  $('voice-detail-tag-filter-reset').disabled = voiceDetailBusyBatches() || count === 0;
+}
+
+function positionVoiceTagPanel(panel, trigger) {
+  const rect = trigger.getBoundingClientRect();
+  const width = panel.offsetWidth || 280;
+  const height = panel.offsetHeight || 280;
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+  const below = rect.bottom + 6;
+  const top = below + height > window.innerHeight - 8
+    ? Math.max(8, rect.top - height - 6) : below;
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+}
+
+function closeVoiceTagPopover({ focus = false } = {}) {
+  const current = openVoiceTagPopoverState;
+  if (!current) return;
+  openVoiceTagPopoverState = null;
+  $('voice-detail-tag-popover').hidden = true;
+  $('voice-detail-tag-popover-error').hidden = true;
+  current.trigger?.setAttribute('aria-expanded', 'false');
+  if (focus && current.trigger?.isConnected && current.trigger.getClientRects().length) {
+    current.trigger.focus();
+  }
+}
+
+function closeVoiceTagFilterPopover({ focus = false } = {}) {
+  const current = openVoiceTagFilterState;
+  if (!current) return;
+  openVoiceTagFilterState = null;
+  $('voice-detail-tag-filter-popover').hidden = true;
+  current.trigger?.setAttribute('aria-expanded', 'false');
+  if (focus && current.trigger?.isConnected && current.trigger.getClientRects().length) {
+    current.trigger.focus();
+  }
+}
+
+function focusVoiceTagOption(tagId) {
+  const input = $('voice-detail-tag-popover-list')
+    .querySelector(`input[data-tag="${tagId}"]`);
+  input?.focus();
+}
+
+function renderVoiceTagsFor(key) {
+  for (const row of voiceDetailRowList()) {
+    const state = voiceDetailRowState.get(row);
+    if (state?.key === key) state.tags?.render();
+  }
+}
+
+function toggleVoiceTagPopover(row, key, trigger, filename) {
+  if (openVoiceTagPopoverState?.row === row && openVoiceTagPopoverState?.key === key) {
+    closeVoiceTagPopover({ focus: true });
+    return;
+  }
+  closeVoiceTagPopover();
+  closeVoiceTagFilterPopover();
+  closeVoiceDetailMenus();
+  if (voiceDetailBusyBatches()) return;
+  const panel = $('voice-detail-tag-popover');
+  $('voice-detail-tag-popover-name').textContent = filename;
+  $('voice-detail-tag-popover-error').hidden = true;
+  panel.hidden = false;
+  openVoiceTagPopoverState = { row, key, trigger, filename };
+  renderVoiceTagPopoverOptions();
+  positionVoiceTagPanel(panel, trigger);
+  trigger.setAttribute('aria-expanded', 'true');
+  const target = $('voice-detail-tag-popover-list').querySelector('input:not(:disabled)')
+    || $('voice-detail-tag-popover-close');
+  target?.focus();
+}
+
+function renderVoiceTagPopoverOptions() {
+  const list = $('voice-detail-tag-popover-list');
+  list.replaceChildren();
+  const current = openVoiceTagPopoverState;
+  if (!current) return;
+  const ids = new Set(voiceDetailTags.bindings.get(current.key) || []);
+  const disabled = voiceDetailTags.busy > 0 || voiceDetailBusyBatches();
+  $('voice-detail-tag-popover-clear').disabled = disabled || ids.size === 0;
+  if (!voiceDetailTags.list.length) {
+    const empty = document.createElement('p');
+    empty.className = 'voice-detail-tag-empty';
+    empty.textContent = voiceDetailTags.loading
+      ? '正在读取标签…' : '还没有自定义标签，先创建一个。';
+    list.append(empty);
+    return;
+  }
+  for (const tag of voiceDetailTags.list) {
+    const label = document.createElement('label');
+    label.className = 'voice-detail-tag-option';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = ids.has(tag.id);
+    input.disabled = disabled;
+    input.dataset.tag = tag.id;
+    input.addEventListener('change', () => {
+      const currentIds = voiceDetailTags.bindings.get(current.key) || [];
+      const next = input.checked
+        ? [...currentIds.filter(id => id !== tag.id), tag.id]
+        : currentIds.filter(id => id !== tag.id);
+      persistVoiceTagBinding(current, next, { revertCheckbox: input, focusTagId: tag.id });
+    });
+    label.append(input, voiceTagChip(tag));
+    list.append(label);
+  }
+}
+
+async function persistVoiceTagBinding(target, tagIds, { revertCheckbox = null, focusTagId = null } = {}) {
+  if (voiceDetailTags.busy) return;
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  const error = $('voice-detail-tag-popover-error');
+  error.hidden = true;
+  voiceDetailTags.busy += 1;
+  for (const node of $('voice-detail-tag-popover-list').querySelectorAll('input')) {
+    node.disabled = true;
+  }
+  $('voice-detail-tag-popover-clear').disabled = true;
+  setVoiceDetailTagStatus('正在保存标签…');
+  let failureText = '';
+  try {
+    const data = await api(`/api/voices/${encodeURIComponent(voiceId)}/tags`, {
+      method: 'POST', body: JSON.stringify({ key: target.key, tag_ids: tagIds }),
+    });
+    if (voiceDetail.id === voiceId && voiceDetail.request === request) {
+      voiceDetailTags.bindings.set(target.key, Array.isArray(data.tag_ids) ? data.tag_ids : []);
+      renderVoiceTagsFor(target.key);
+      if (voiceDetailFilter.tags.size) applyVoiceDetailFilter();
+    }
+  } catch (failure) {
+    failureText = failure.message;
+    if (revertCheckbox?.isConnected) revertCheckbox.checked = !revertCheckbox.checked;
+  } finally {
+    voiceDetailTags.busy = Math.max(0, voiceDetailTags.busy - 1);
+    if (voiceDetail.id === voiceId && voiceDetail.request === request) setVoiceDetailTagStatus('');
+  }
+  if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+  if (target.row.hidden) {
+    closeVoiceTagPopover();
+    return;
+  }
+  if (openVoiceTagPopoverState !== target) return;
+  renderVoiceTagPopoverOptions();
+  if (failureText) {
+    error.textContent = `保存标签失败：${failureText}`;
+    error.hidden = false;
+  }
+  if (focusTagId) focusVoiceTagOption(focusTagId);
+}
+
+function toggleVoiceTagFilterPopover(trigger) {
+  if (openVoiceTagFilterState) {
+    closeVoiceTagFilterPopover({ focus: true });
+    return;
+  }
+  if (voiceDetailBusyBatches()) {
+    setVoiceDetailTagStatus('批量操作进行中，请稍候再筛选。');
+    return;
+  }
+  closeVoiceTagPopover();
+  closeVoiceDetailMenus();
+  const panel = $('voice-detail-tag-filter-popover');
+  panel.hidden = false;
+  openVoiceTagFilterState = { trigger };
+  renderVoiceTagFilterOptions();
+  positionVoiceTagPanel(panel, trigger);
+  trigger.setAttribute('aria-expanded', 'true');
+  const target = $('voice-detail-tag-filter-list').querySelector('input:not(:disabled)')
+    || $('voice-detail-tag-filter-close');
+  target?.focus();
+}
+
+function setVoiceTagFilterValue(id, checked) {
+  if (voiceDetailBusyBatches()) return;
+  if (checked) voiceDetailFilter.tags.add(id);
+  else voiceDetailFilter.tags.delete(id);
+  applyVoiceDetailFilter();
+  refreshVoiceTagFilterButton();
+}
+
+function renderVoiceTagFilterOptions() {
+  const list = $('voice-detail-tag-filter-list');
+  list.replaceChildren();
+  const disabled = voiceDetailBusyBatches();
+  $('voice-detail-tag-filter-reset').disabled = disabled || voiceDetailFilter.tags.size === 0;
+  const option = (id, chip) => {
+    const label = document.createElement('label');
+    label.className = 'voice-detail-tag-option';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = voiceDetailFilter.tags.has(id);
+    input.disabled = disabled;
+    input.addEventListener('change', () => setVoiceTagFilterValue(id, input.checked));
+    label.append(input, chip);
+    list.append(label);
+  };
+  const noTag = document.createElement('span');
+  noTag.className = 'voice-detail-tag-chip is-placeholder';
+  noTag.textContent = '无标签';
+  option(VOICE_TAG_NONE, noTag);
+  for (const tag of voiceDetailTags.list) option(tag.id, voiceTagChip(tag));
+  if (!voiceDetailTags.list.length) {
+    const empty = document.createElement('p');
+    empty.className = 'voice-detail-tag-empty';
+    empty.textContent = voiceDetailTags.loading ? '正在读取标签…' : '还没有自定义标签。';
+    list.append(empty);
+  }
+}
+
+function renderAllVoiceTags() {
+  for (const row of voiceDetailRowList()) voiceDetailRowState.get(row)?.tags?.render();
+  if (openVoiceTagPopoverState) renderVoiceTagPopoverOptions();
+  if (openVoiceTagFilterState) renderVoiceTagFilterOptions();
+  if ($('voice-tag-dialog').open) renderVoiceTagDialogList();
+  refreshVoiceTagFilterButton();
+}
+
+async function loadVoiceDetailTags() {
+  if (!voiceDetail.id) return;
+  const voiceId = voiceDetail.id, request = voiceDetail.request;
+  const load = ++voiceDetailTags.request;
+  voiceDetailTags.loading = true;
+  setVoiceDetailTagStatus('正在读取标签…');
+  try {
+    const data = await api(`/api/voices/${encodeURIComponent(voiceId)}/tags`);
+    if (voiceDetail.id !== voiceId || voiceDetail.request !== request
+        || voiceDetailTags.request !== load) return;
+    voiceDetailTags.voiceId = voiceId;
+    voiceDetailTags.list = Array.isArray(data.tags) ? data.tags : [];
+    voiceDetailTags.bindings = new Map(Object.entries(data.bindings || {}));
+    voiceDetailTags.loading = false;
+    renderAllVoiceTags();
+    if (voiceDetailFilter.tags.size || voiceDetailFilter.query) applyVoiceDetailFilter();
+    setVoiceDetailTagStatus('');
+  } catch (failure) {
+    if (voiceDetail.id !== voiceId || voiceDetail.request !== request) return;
+    voiceDetailTags.loading = false;
+    if ($('voice-tag-dialog').open) renderVoiceTagDialogList();
+    if (openVoiceTagPopoverState) renderVoiceTagPopoverOptions();
+    if (openVoiceTagFilterState) renderVoiceTagFilterOptions();
+    setVoiceDetailTagStatus(`标签读取失败：${failure.message}`);
+  } finally {
+    if (voiceDetailTags.request === load) voiceDetailTags.loading = false;
+  }
+}
+
+function resetVoiceDetailTags() {
+  voiceTagDialogState.returnFocus = null;
+  closeVoiceTagPopover();
+  closeVoiceTagFilterPopover();
+  if ($('voice-tag-dialog').open) closeVoiceTagDialog({ force: true });
+  voiceDetailTags.voiceId = null;
+  voiceDetailTags.list = [];
+  voiceDetailTags.bindings = new Map();
+  voiceDetailTags.request += 1;
+  voiceDetailTags.loading = false;
+  voiceDetailFilter.query = '';
+  voiceDetailFilter.tags.clear();
+  voiceDetailFilter.pending = false;
+  $('voice-detail-search').value = '';
+  $('voice-detail-tag-status').textContent = '';
+  $('voice-detail-tag-status').hidden = true;
+  $('voice-detail-match-count').textContent = '匹配 0 / 共 0 条';
+  $('voice-detail-no-match').hidden = true;
+  refreshVoiceTagFilterButton();
+}
+
+function updateVoiceTagPreview() {
+  const preview = $('voice-tag-preview');
+  preview.textContent = $('voice-tag-name').value.trim() || '标签预览';
+  styleVoiceTagChip(preview, $('voice-tag-color').value);
+}
+
+function showVoiceTagError(text) {
+  const node = $('voice-tag-error');
+  node.textContent = text || '';
+  node.hidden = !text;
+}
+
+function resetVoiceTagForm() {
+  voiceTagDialogState.editing = null;
+  voiceTagDialogState.original = null;
+  $('voice-tag-name').value = '';
+  $('voice-tag-color').value = DEFAULT_VOICE_TAG_COLOR;
+  $('voice-tag-submit').textContent = '添加标签';
+  $('voice-tag-cancel-edit').hidden = true;
+  showVoiceTagError('');
+  updateVoiceTagPreview();
+}
+
+function voiceTagFormDirty() {
+  const name = $('voice-tag-name').value.trim();
+  const color = $('voice-tag-color').value.toLowerCase();
+  const original = voiceTagDialogState.original;
+  if (voiceTagDialogState.editing && original) {
+    return name !== original.name || color !== original.color.toLowerCase();
+  }
+  return Boolean(name) || color !== DEFAULT_VOICE_TAG_COLOR;
+}
+
+function renderVoiceTagDialogList() {
+  const list = $('voice-tag-list');
+  list.replaceChildren();
+  const empty = $('voice-tag-empty');
+  empty.hidden = voiceDetailTags.list.length > 0;
+  empty.textContent = voiceDetailTags.loading
+    ? '正在读取标签…' : '还没有标签，使用上方表单添加。';
+  for (const tag of voiceDetailTags.list) {
+    const row = document.createElement('li');
+    row.className = 'voice-tag-row';
+    row.append(voiceTagChip(tag));
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'text-btn';
+    edit.textContent = '编辑';
+    edit.addEventListener('click', () => beginEditVoiceTag(tag));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'text-btn voice-tag-remove';
+    remove.textContent = '删除';
+    remove.addEventListener('click', () => askDeleteVoiceTag(tag));
+    row.append(edit, remove);
+    list.append(row);
+  }
+}
+
+function openVoiceTagDialog(returnFocus = null) {
+  if (voiceDetailBusyBatches()) {
+    setVoiceDetailTagStatus('批量操作进行中，请稍候再管理标签。');
+    return;
+  }
+  const dialog = $('voice-tag-dialog');
+  if (dialog.open) return;
+  closeVoiceTagPopover();
+  closeVoiceTagFilterPopover();
+  voiceTagDialogState.returnFocus = returnFocus || document.activeElement;
+  resetVoiceTagForm();
+  voiceTagDialogState.deleteId = null;
+  $('voice-tag-delete-confirm').hidden = true;
+  $('voice-tag-discard').hidden = true;
+  renderVoiceTagDialogList();
+  dialog.showModal();
+  $('voice-tag-name').focus();
+}
+
+function closeVoiceTagDialog({ force = false } = {}) {
+  const dialog = $('voice-tag-dialog');
+  if (!dialog.open) return;
+  if (!force && voiceTagFormDirty()) {
+    requestCloseVoiceTagDialog();
+    return;
+  }
+  dialog.close();
+  $('voice-tag-discard').hidden = true;
+  $('voice-tag-delete-confirm').hidden = true;
+  voiceTagDialogState.deleteId = null;
+  resetVoiceTagForm();
+  const target = voiceTagDialogState.returnFocus;
+  voiceTagDialogState.returnFocus = null;
+  if (target?.isConnected && target.getClientRects().length) target.focus();
+}
+
+function requestCloseVoiceTagDialog() {
+  if (!$('voice-tag-delete-confirm').hidden) {
+    hideVoiceTagDeleteConfirm();
+    return;
+  }
+  if (voiceTagFormDirty()) {
+    $('voice-tag-discard').hidden = false;
+    $('voice-tag-discard-cancel').focus();
+    return;
+  }
+  closeVoiceTagDialog();
+}
+
+function beginEditVoiceTag(tag) {
+  voiceTagDialogState.editing = tag;
+  voiceTagDialogState.original = { name: tag.name, color: tag.color };
+  voiceTagDialogState.deleteId = null;
+  $('voice-tag-name').value = tag.name;
+  $('voice-tag-color').value = tag.color;
+  $('voice-tag-submit').textContent = '保存修改';
+  $('voice-tag-cancel-edit').hidden = false;
+  $('voice-tag-delete-confirm').hidden = true;
+  showVoiceTagError('');
+  updateVoiceTagPreview();
+  $('voice-tag-name').focus();
+  $('voice-tag-name').select();
+}
+
+function askDeleteVoiceTag(tag) {
+  voiceTagDialogState.deleteId = tag.id;
+  $('voice-tag-delete-name').textContent = tag.name;
+  $('voice-tag-delete-confirm').hidden = false;
+  $('voice-tag-delete-confirm-btn').disabled = false;
+  $('voice-tag-delete-cancel').focus();
+}
+
+function hideVoiceTagDeleteConfirm() {
+  voiceTagDialogState.deleteId = null;
+  $('voice-tag-delete-confirm').hidden = true;
+  $('voice-tag-name').focus();
+}
+
+function applyVoiceTagDictionary(tags) {
+  voiceDetailTags.request += 1;
+  voiceDetailTags.loading = false;
+  voiceDetailTags.list = Array.isArray(tags) ? tags : [];
+  const known = new Set(voiceDetailTags.list.map(tag => tag.id));
+  for (const [key, ids] of [...voiceDetailTags.bindings]) {
+    const filtered = ids.filter(id => known.has(id));
+    if (filtered.length) voiceDetailTags.bindings.set(key, filtered);
+    else voiceDetailTags.bindings.delete(key);
+  }
+  for (const id of [...voiceDetailFilter.tags]) {
+    if (id !== VOICE_TAG_NONE && !known.has(id)) voiceDetailFilter.tags.delete(id);
+  }
+  renderAllVoiceTags();
+  applyVoiceDetailFilter();
+}
+
+$('voice-tag-form').onsubmit = async event => {
+  event.preventDefault();
+  if (voiceDetailTags.busy) return;
+  const name = $('voice-tag-name').value.trim();
+  const color = $('voice-tag-color').value;
+  const editing = voiceTagDialogState.editing;
+  if (!name) {
+    showVoiceTagError('标签名称不能为空');
+    $('voice-tag-name').focus();
+    return;
+  }
+  voiceDetailTags.busy += 1;
+  $('voice-tag-submit').disabled = true;
+  showVoiceTagError('');
+  try {
+    const payload = editing
+      ? { action: 'update', id: editing.id, name, color }
+      : { action: 'create', name, color };
+    const data = await api('/api/voice-tags', {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+    applyVoiceTagDictionary(data.tags);
+    resetVoiceTagForm();
+    renderVoiceTagDialogList();
+    $('voice-tag-name').focus();
+  } catch (failure) {
+    showVoiceTagError(`保存标签失败：${failure.message}`);
+  } finally {
+    voiceDetailTags.busy = Math.max(0, voiceDetailTags.busy - 1);
+    $('voice-tag-submit').disabled = false;
+  }
+};
+
+$('voice-tag-delete-confirm-btn').onclick = async () => {
+  const id = voiceTagDialogState.deleteId;
+  if (!id || voiceDetailTags.busy) return;
+  const button = $('voice-tag-delete-confirm-btn');
+  voiceDetailTags.busy += 1;
+  button.disabled = true;
+  showVoiceTagError('');
+  try {
+    const data = await api('/api/voice-tags', {
+      method: 'POST', body: JSON.stringify({ action: 'delete', id }),
+    });
+    hideVoiceTagDeleteConfirm();
+    if (voiceTagDialogState.editing?.id === id) resetVoiceTagForm();
+    applyVoiceTagDictionary(data.tags);
+    renderVoiceTagDialogList();
+    $('voice-tag-name').focus();
+  } catch (failure) {
+    showVoiceTagError(`删除标签失败：${failure.message}`);
+  } finally {
+    voiceDetailTags.busy = Math.max(0, voiceDetailTags.busy - 1);
+    button.disabled = false;
+  }
+};
+
+$('voice-tag-dialog-close').onclick = () => requestCloseVoiceTagDialog();
+$('voice-tag-dialog-done').onclick = () => requestCloseVoiceTagDialog();
+$('voice-tag-cancel-edit').onclick = () => { resetVoiceTagForm(); $('voice-tag-name').focus(); };
+$('voice-tag-delete-cancel').onclick = () => hideVoiceTagDeleteConfirm();
+$('voice-tag-discard-confirm').onclick = () => closeVoiceTagDialog({ force: true });
+$('voice-tag-discard-cancel').onclick = () => {
+  $('voice-tag-discard').hidden = true;
+  $('voice-tag-name').focus();
+};
+$('voice-tag-name').addEventListener('input', updateVoiceTagPreview);
+$('voice-tag-color').addEventListener('input', updateVoiceTagPreview);
+$('voice-tag-dialog').oncancel = event => {
+  event.preventDefault();
+  requestCloseVoiceTagDialog();
+};
+
+$('voice-detail-tag-popover-close').onclick = () => closeVoiceTagPopover({ focus: true });
+$('voice-detail-tag-popover-clear').onclick = () => {
+  const target = openVoiceTagPopoverState;
+  if (!target || voiceDetailTags.busy) return;
+  persistVoiceTagBinding(target, [], {});
+};
+$('voice-detail-tag-popover-manage').onclick = () => {
+  const trigger = openVoiceTagPopoverState?.trigger;
+  closeVoiceTagPopover();
+  openVoiceTagDialog(trigger || $('voice-detail-tag-manage'));
+};
+$('voice-detail-tag-filter-close').onclick = () => closeVoiceTagFilterPopover({ focus: true });
+$('voice-detail-tag-filter-reset').onclick = () => {
+  if (voiceDetailBusyBatches()) return;
+  voiceDetailFilter.tags.clear();
+  applyVoiceDetailFilter();
+  refreshVoiceTagFilterButton();
+  renderVoiceTagFilterOptions();
+};
+
+function applyVoiceDetailSearch() {
+  if (voiceDetailBusyBatches()) return;
+  voiceDetailFilter.query = normalizeVoiceTagText($('voice-detail-search').value.trim());
+  voiceDetailFilter.pending = false;
+  applyVoiceDetailFilter();
+  refreshVoiceTagFilterButton();
+}
+$('voice-detail-search').addEventListener('input', applyVoiceDetailSearch);
+$('voice-detail-search').addEventListener('search', applyVoiceDetailSearch);
+$('voice-detail-tag-filter').addEventListener('click', event => {
+  event.stopPropagation();
+  toggleVoiceTagFilterPopover(event.currentTarget);
+});
+$('voice-detail-tag-manage').addEventListener('click', event => {
+  event.stopPropagation();
+  openVoiceTagDialog(event.currentTarget);
+});
+$('voice-detail-filter-clear').addEventListener('click', () => {
+  if (voiceDetailBusyBatches()) return;
+  $('voice-detail-search').value = '';
+  voiceDetailFilter.query = '';
+  voiceDetailFilter.tags.clear();
+  voiceDetailFilter.pending = false;
+  closeVoiceTagFilterPopover();
+  applyVoiceDetailFilter();
+  refreshVoiceTagFilterButton();
+});
+
+document.addEventListener('click', event => {
+  if (openVoiceTagPopoverState
+      && !$('voice-detail-tag-popover').contains(event.target)
+      && !openVoiceTagPopoverState.trigger.contains(event.target)) {
+    closeVoiceTagPopover();
+  }
+  if (openVoiceTagFilterState
+      && !$('voice-detail-tag-filter-popover').contains(event.target)
+      && !openVoiceTagFilterState.trigger.contains(event.target)) {
+    closeVoiceTagFilterPopover();
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  if (openVoiceTagPopoverState) {
+    closeVoiceTagPopover({ focus: true });
+    return;
+  }
+  if (openVoiceTagFilterState) closeVoiceTagFilterPopover({ focus: true });
+});
+
 let openVoiceDetailMenu = null;
 let voiceDeleteContext = null, voiceDeleteBusy = false;
 
@@ -1766,6 +2501,8 @@ function voiceDetailPlayer({ audioUrl, preload, onDelete, deleteLabel }) {
   });
   more.onclick = event => {
     event.stopPropagation();
+    closeVoiceTagPopover();
+    closeVoiceTagFilterPopover();
     const opening = menu.hidden;
     closeVoiceDetailMenus();
     if (!opening) return;
@@ -1850,22 +2587,33 @@ function setVoiceDetailSelected(row, selected) {
 
 function refreshVoiceDetailSelection() {
   const rows = voiceDetailRowList();
-  let selected = 0;
+  const visible = rows.filter(row => !row.hidden);
+  const locked = voiceDetailBusyBatches();
+  let selected = 0, hiddenSelected = 0;
   for (const row of rows) {
     const state = voiceDetailRowState.get(row);
     if (!state) continue;
     const checked = voiceDetailSelection.has(state.key);
     state.checkbox.checked = checked;
-    if (checked) selected += 1;
+    if (checked) {
+      selected += 1;
+      if (row.hidden) hiddenSelected += 1;
+    }
   }
-  const total = rows.length;
+  const matched = visible.length;
+  const matchedSelected = visible.reduce((count, row) => {
+    const state = voiceDetailRowState.get(row);
+    return count + (state && voiceDetailSelection.has(state.key) ? 1 : 0);
+  }, 0);
   const selectAll = $('voice-detail-select-all');
-  selectAll.checked = total > 0 && selected === total;
-  selectAll.indeterminate = selected > 0 && selected < total;
-  selectAll.disabled = total === 0;
-  $('voice-detail-select-empty').disabled = total === 0;
-  $('voice-detail-clear-selection').disabled = selected === 0;
-  $('voice-detail-selection-count').textContent = `已选 ${selected} / 共 ${total} 条`;
+  selectAll.checked = matched > 0 && matchedSelected === matched;
+  selectAll.indeterminate = matchedSelected > 0 && matchedSelected < matched;
+  selectAll.disabled = locked || matched === 0;
+  $('voice-detail-select-empty').disabled = locked || matched === 0;
+  $('voice-detail-clear-selection').disabled = locked || selected === 0;
+  $('voice-detail-selection-count').textContent = `已选 ${selected} / 匹配 ${matched} 条`
+    + (hiddenSelected ? ` · 其中 ${hiddenSelected} 条被筛选隐藏` : '');
+  $('voice-detail-match-count').textContent = `匹配 ${matched} / 共 ${rows.length} 条`;
   updateVoiceDetailBatchButtons();
 }
 
@@ -1889,6 +2637,7 @@ function selectedVoiceDetailItems() {
 function voiceDetailRow(spec) {
   const row = document.createElement('tr');
   row.className = 'voice-detail-row';
+  const key = voiceDetailSelectionKey(spec.selection);
 
   const number = document.createElement('td');
   number.className = 'voice-detail-number';
@@ -1920,14 +2669,12 @@ function voiceDetailRow(spec) {
   typeCell.className = 'voice-detail-type';
   const typeMain = document.createElement('div');
   typeMain.className = 'voice-detail-type-main';
-  const tag = document.createElement('span');
-  tag.className = 'voice-detail-source';
-  tag.textContent = spec.tag;
+  const tagControl = voiceDetailTagControl({ row, key, filename: spec.filename });
   const name = document.createElement('span');
   name.className = 'voice-detail-asset-name';
   name.textContent = spec.filename;
   name.title = spec.filename;
-  typeMain.append(tag, name);
+  typeMain.append(tagControl.button, name);
   const status = document.createElement('span');
   status.className = 'voice-detail-status';
   status.setAttribute('role', 'status');
@@ -1963,7 +2710,21 @@ function voiceDetailRow(spec) {
   stack.append(save, identify);
   actionCell.append(stack);
 
-  editor.addEventListener('input', () => { status.textContent = '尚未保存'; });
+  editor.addEventListener('input', () => {
+    status.textContent = '尚未保存';
+    if (voiceDetailFilter.query) voiceDetailFilter.pending = true;
+  });
+  editor.addEventListener('blur', () => {
+    if (!voiceDetailFilter.pending) return;
+    voiceDetailFilter.pending = false;
+    // Let a click on this row's save/identify/delete control finish before the
+    // row can drop out of the current search; never hide a focused row.
+    setTimeout(() => {
+      if (!row.isConnected || row.contains(document.activeElement)) return;
+      if (document.querySelector('dialog[open]')) return;
+      applyVoiceDetailFilter();
+    }, 0);
+  });
 
   const identifier = voiceDetailIdentifier({
     row, editor, status, identify, save,
@@ -1997,6 +2758,8 @@ function voiceDetailRow(spec) {
       editor.value = saved.text ?? '';
       editor.defaultValue = editor.value;
       status.textContent = '已保存';
+      voiceDetailFilter.pending = false;
+      if (!fromBatch) applyVoiceDetailFilter();
       return { status: 'saved', text: editor.value };
     } catch (error) {
       if (!row.isConnected || voiceDetail.id !== voiceId || voiceDetail.request !== request) {
@@ -2016,8 +2779,10 @@ function voiceDetailRow(spec) {
   save.onclick = () => { saveRow().catch(() => {}); };
 
   row.append(number, audioCell, typeCell, textCell, actionCell);
-  const key = voiceDetailSelectionKey(spec.selection);
-  voiceDetailRowState.set(row, { editor, identifier, checkbox, key, selection: spec.selection, save, identify, saveRow, status });
+  voiceDetailRowState.set(row, {
+    editor, identifier, checkbox, key, filename: spec.filename, tags: tagControl,
+    selection: spec.selection, save, identify, saveRow, status,
+  });
   checkbox.addEventListener('change', () => {
     setVoiceDetailSelected(row, checkbox.checked);
     refreshVoiceDetailSelection();
@@ -2080,8 +2845,10 @@ async function deleteVoiceDetailAsset(asset, built) {
     const position = voiceDetail.assets.findIndex(item => item.id === asset.id);
     if (position !== -1) voiceDetail.assets.splice(position, 1);
     voiceDetailSelection.delete(`asset:${asset.id}`);
+    voiceDetailTags.bindings.delete(`asset:${asset.id}`);
     built.row.remove();
     renumberVoiceDetailRows();
+    applyVoiceDetailFilter();
     restoreVoiceDetailAudio(released);
   } catch (error) {
     restoreVoiceDetailAudio(released);
@@ -2101,8 +2868,12 @@ async function deleteVoiceDetailReference(clip, built, voiceId) {
     const position = state.voices.findIndex(item => item.id === voiceId);
     if (position !== -1) state.voices[position] = updated;
     voiceDetailSelection.delete(`reference:${clip.audio}`);
+    if (!(updated.references || []).some(item => item.audio === clip.audio)) {
+      voiceDetailTags.bindings.delete(`reference:${clip.audio}`);
+    }
     built.row.remove();
     renumberVoiceDetailRows();
+    applyVoiceDetailFilter();
     restoreVoiceDetailAudio(released);
   } catch (error) {
     restoreVoiceDetailAudio(released);
@@ -2112,7 +2883,6 @@ async function deleteVoiceDetailReference(clip, built, voiceId) {
 
 function voiceDetailAssetRow(asset) {
   const built = voiceDetailRow({
-    tag: '素材',
     filename: asset.filename,
     selection: { kind: 'asset', assetId: asset.id, audio: asset.audio_url },
     audioUrl: asset.audio_url,
@@ -2140,6 +2910,7 @@ function voiceDetailAssetRow(asset) {
 function appendVoiceDetailAssetRow(asset) {
   $('voice-detail-assets').append(voiceDetailAssetRow(asset).row);
   renumberVoiceDetailRows();
+  applyVoiceDetailFilter();
 }
 
 function renderVoiceDetailAssets() {
@@ -2147,6 +2918,7 @@ function renderVoiceDetailAssets() {
   rows.replaceChildren();
   voiceDetail.assets.forEach(asset => rows.append(voiceDetailAssetRow(asset).row));
   renumberVoiceDetailRows();
+  applyVoiceDetailFilter();
 }
 
 async function loadVoiceDetailAssets() {
@@ -2227,6 +2999,7 @@ async function importVoiceFiles(files) {
         summary.push(`失败 ${failed.length} 条：${failed.map(item => `${item.name}（${item.reason}）`).join('；')}`);
       }
       setVoiceDetailImportStatus(`导入结束：${summary.join('，')}`);
+      applyVoiceDetailFilter();
     }
   }
 }
@@ -2247,19 +3020,15 @@ $('voice-detail-import-input').onchange = () => {
 };
 
 $('voice-detail-select-all').onchange = event => {
-  const rows = voiceDetailRowList();
-  if (event.target.checked) {
-    for (const row of rows) setVoiceDetailSelected(row, true);
-  } else {
-    voiceDetailSelection.clear();
-  }
+  const rows = voiceDetailRowList().filter(row => !row.hidden);
+  for (const row of rows) setVoiceDetailSelected(row, event.target.checked);
   refreshVoiceDetailSelection();
 };
 $('voice-detail-select-empty').onclick = () => {
-  voiceDetailSelection.clear();
   for (const row of voiceDetailRowList()) {
+    if (row.hidden) continue;
     const state = voiceDetailRowState.get(row);
-    if (state && state.editor.value.trim() === '') setVoiceDetailSelected(row, true);
+    setVoiceDetailSelected(row, Boolean(state && state.editor.value.trim() === ''));
   }
   refreshVoiceDetailSelection();
 };
@@ -2292,10 +3061,20 @@ function setVoiceDetailBatchLock(locked) {
     if (state.checkbox) state.checkbox.disabled = locked;
     if (state.save) state.save.disabled = locked;
     if (state.identify) state.identify.disabled = locked;
+    state.tags?.setLocked(locked);
   }
+  if (locked) {
+    closeVoiceTagPopover();
+    closeVoiceTagFilterPopover();
+  }
+  const visible = rows.filter(row => !row.hidden).length;
   $('voice-detail-import').disabled = locked;
-  $('voice-detail-select-all').disabled = locked || rows.length === 0;
-  $('voice-detail-select-empty').disabled = locked || rows.length === 0;
+  $('voice-detail-search').disabled = locked;
+  $('voice-detail-tag-filter').disabled = locked;
+  $('voice-detail-tag-manage').disabled = locked;
+  $('voice-detail-filter-clear').disabled = locked;
+  $('voice-detail-select-all').disabled = locked || visible === 0;
+  $('voice-detail-select-empty').disabled = locked || visible === 0;
   $('voice-detail-clear-selection').disabled = locked || voiceDetailSelection.size === 0;
   updateVoiceDetailBatchButtons();
 }
@@ -2318,6 +3097,10 @@ async function startVoiceDetailBatch(force) {
   }
   if (voiceDetail.importing) {
     setVoiceDetailBatchStatus('正在导入音频，请稍候再开始批量识别。');
+    return;
+  }
+  if (voiceDetailTags.busy) {
+    setVoiceDetailBatchStatus('正在保存标签，请稍候再开始批量识别。');
     return;
   }
   const voiceId = voiceDetail.id, request = voiceDetail.request;
@@ -2361,6 +3144,7 @@ async function startVoiceDetailBatch(force) {
       voiceDetailBatch.running = false;
       voiceDetailBatch.stop = false;
       setVoiceDetailBatchLock(false);
+      if (voiceDetail.id === voiceId && voiceDetail.request === request) applyVoiceDetailFilter();
       const remaining = Math.max(0, items.length - processed);
       const tail = halted ? '（识别模型不可用，已停止剩余）' : '';
       if (voiceDetail.id === voiceId && voiceDetail.request === request) {
@@ -2388,6 +3172,10 @@ async function startVoiceDetailSaveBatch() {
   if (!items.length) return;
   if (voiceDetail.importing) {
     setVoiceDetailSaveBatchStatus('正在导入音频，请稍候再保存。');
+    return;
+  }
+  if (voiceDetailTags.busy) {
+    setVoiceDetailSaveBatchStatus('正在保存标签，请稍候再保存文字。');
     return;
   }
   const busy = voiceDetailRowList().some(row => {
@@ -2435,6 +3223,7 @@ async function startVoiceDetailSaveBatch() {
     if (voiceDetailSaveBatch.runId === runId) {
       voiceDetailSaveBatch.running = false;
       setVoiceDetailBatchLock(false);
+      if (voiceDetail.id === voiceId && voiceDetail.request === request) applyVoiceDetailFilter();
       if (voiceDetail.id === voiceId && voiceDetail.request === request) {
         setVoiceDetailSaveBatchStatus(
           `保存结束 · 所选${items.length} · 成功${success} · 失败${failed} · 未变跳过${skipped}`);
@@ -2482,6 +3271,10 @@ async function startVoiceDetailAdoptBatch() {
     setVoiceDetailActionStatus('正在导入音频，请稍候。');
     return;
   }
+  if (voiceDetailTags.busy) {
+    setVoiceDetailActionStatus('正在保存标签，请稍候再采用候选。');
+    return;
+  }
   const items = selectedVoiceDetailItems();
   if (!items.length) return;
   const busy = voiceDetailRowList().some(row => {
@@ -2515,6 +3308,7 @@ async function startVoiceDetailAdoptBatch() {
     if (!state || !state.identifier.hasPendingCandidate()) continue;
     if (state.identifier.adoptCandidate()) adopted += 1;
   }
+  applyVoiceDetailFilter();
   setVoiceDetailActionStatus(`采用结束 · 采用${adopted} · 跳过${items.length - adopted}`);
 }
 
@@ -2545,6 +3339,10 @@ function openVoiceDetailDeleteBatchDialog() {
   }
   if (voiceDetail.importing) {
     setVoiceDetailActionStatus('正在导入音频，请稍候。');
+    return;
+  }
+  if (voiceDetailTags.busy) {
+    setVoiceDetailActionStatus('正在保存标签，请稍候再删除。');
     return;
   }
   const busy = voiceDetailRowList().some(row => {
@@ -2601,6 +3399,7 @@ async function startVoiceDetailDeleteBatch() {
     if (voiceDetailDeleteBatch.runId === runId) {
       voiceDetailDeleteBatch.running = false;
       setVoiceDetailBatchLock(false);
+      if (voiceDetail.id === voiceId && voiceDetail.request === request) applyVoiceDetailFilter();
       if (voiceDetail.id === voiceId && voiceDetail.request === request) {
         setVoiceDetailActionStatus(
           `删除结束 · 成功${success} · 失败${failed}${failed ? '（失败原因见对应行）' : ''}`);
@@ -2643,6 +3442,11 @@ $('voice-asset-delete-confirm').onclick = async () => {
     error.hidden = false;
     return;
   }
+  if (voiceDetailTags.busy) {
+    error.textContent = '正在保存标签，请稍候再删除。';
+    error.hidden = false;
+    return;
+  }
   const confirm = $('voice-asset-delete-confirm');
   const cancel = $('voice-asset-delete-cancel');
   const close = $('voice-asset-delete-close');
@@ -2674,6 +3478,7 @@ function openVoiceDetail(voiceId) {
   voiceDetail.request += 1;
   voiceDetail.assets = [];
   voiceDetail.importing = false;
+  resetVoiceDetailTags();
   voiceDetailSelection.clear();
   voiceDetailBatch.runId += 1;
   voiceDetailBatch.running = false;
@@ -2687,6 +3492,10 @@ function openVoiceDetail(voiceId) {
   setVoiceDetailActionStatus('');
   setVoiceDetailImportStatus('');
   $('voice-detail-import').disabled = false;
+  $('voice-detail-search').disabled = false;
+  $('voice-detail-tag-filter').disabled = false;
+  $('voice-detail-tag-manage').disabled = false;
+  $('voice-detail-filter-clear').disabled = false;
   const detail = $('voice-detail');
   unloadVoiceDetailAudio(detail);
   $('voice-detail-assets').replaceChildren();
@@ -2700,7 +3509,6 @@ function openVoiceDetail(voiceId) {
 
   clips.forEach((clip, index) => {
     const built = voiceDetailRow({
-      tag: '参考',
       filename: clip.audio || `语音 ${index + 1}`,
       selection: { kind: 'reference', audio: clip.audio },
       audioUrl: clip.audio_url,
@@ -2742,6 +3550,7 @@ function openVoiceDetail(voiceId) {
   document.querySelector('#view-voices .voice-library-toolbar').hidden = true;
   detail.hidden = false;
   updateVoiceDetailCount();
+  loadVoiceDetailTags();
   loadVoiceDetailAssets();
 }
 function renderVoices() {

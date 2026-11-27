@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -119,6 +120,14 @@ def _voice_id(value):
 
 # Voice-library dataset assets live beside a voice and never change voice.json.
 VOICE_CLIP_SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a")
+# User tags are a library-wide dictionary plus sidecar bindings per voice, so the
+# legacy voice.json and dataset.json schemas stay untouched.
+VOICE_TAGS_FILE = "voice-tags.json"
+VOICE_TAG_ASSIGNMENTS_FILE = "tag-assignments.json"
+VOICE_TAG_ID = re.compile(r"[a-f0-9]{32}")
+VOICE_TAG_KEY = re.compile(r"(asset:[a-f0-9]{32}|reference:[^/\\]{1,240})")
+VOICE_TAG_COLORS = re.compile(r"#[0-9a-fA-F]{6}")
+DEFAULT_VOICE_TAG_COLOR = "#c64a2e"
 
 
 def _voice_dataset_file(folder: Path) -> Path:
@@ -174,6 +183,93 @@ def _write_voice_metadata(path: Path, metadata: dict):
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_json_atomic(path: Path, value):
+    temporary = path.with_name(f"{path.stem}-{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_voice_tags(root: Path) -> list[dict]:
+    path = root / VOICE_TAGS_FILE
+    if not path.is_file():
+        return []
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    raw = value.get("tags") if isinstance(value, dict) else None
+    if not isinstance(raw, list):
+        return []
+    tags, seen = [], set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        identifier, name = item.get("id"), item.get("name")
+        if not isinstance(identifier, str) or not VOICE_TAG_ID.fullmatch(identifier):
+            continue
+        if identifier in seen or not isinstance(name, str) or not name.strip():
+            continue
+        color = item.get("color")
+        if not isinstance(color, str) or not VOICE_TAG_COLORS.fullmatch(color):
+            color = DEFAULT_VOICE_TAG_COLOR
+        tags.append({"id": identifier, "name": name.strip(), "color": color.lower()})
+        seen.add(identifier)
+    return tags
+
+
+def _write_voice_tags(root: Path, tags: list[dict]):
+    _write_json_atomic(root / VOICE_TAGS_FILE, {"schema": 1, "tags": tags})
+
+
+def _read_voice_tag_assignments(folder: Path) -> dict[str, list[str]]:
+    path = folder / VOICE_TAG_ASSIGNMENTS_FILE
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = value.get("assignments") if isinstance(value, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    result = {}
+    for key, ids in raw.items():
+        if not isinstance(key, str) or not VOICE_TAG_KEY.fullmatch(key) or not isinstance(ids, list):
+            continue
+        clean = []
+        for tag_id in ids:
+            if (isinstance(tag_id, str) and VOICE_TAG_ID.fullmatch(tag_id)
+                    and tag_id not in clean):
+                clean.append(tag_id)
+        if clean:
+            result[key] = clean
+    return result
+
+
+def _write_voice_tag_assignments(folder: Path, assignments: dict[str, list[str]]):
+    _write_json_atomic(folder / VOICE_TAG_ASSIGNMENTS_FILE,
+                       {"schema": 1, "assignments": assignments})
+
+
+def _voice_tag_name(value) -> str:
+    if not isinstance(value, str):
+        raise ValueError("标签名称必须是文本")
+    name = unicodedata.normalize("NFKC", value).strip()
+    if not name or len(name) > 24 or any(ord(character) < 32 for character in name):
+        raise ValueError("标签名称需为 1-24 个字符，且不能包含控制字符")
+    return name
+
+
+def _voice_tag_color(value) -> str:
+    if not isinstance(value, str) or not VOICE_TAG_COLORS.fullmatch(value.strip()):
+        raise ValueError("标签颜色需为 #RRGGBB 格式")
+    return value.strip().lower()
 
 
 def _unlink_released(path: Path, attempts: int = 3, delay: float = 0.1):
@@ -282,6 +378,7 @@ class AppState:
         self.asr = ReferenceTranscriber(ROOT, self.data_root, self._executor)
         self.studio = StudioStore(self.data_root)
         self._reference_assets_lock = threading.RLock()
+        self._voice_tags_lock = threading.RLock()
         self.started_at = time.time()
         self._load_persisted_jobs()
 
@@ -2229,6 +2326,7 @@ class AppState:
                 # Keep the audio and its metadata together when the file cannot be removed.
                 _write_voice_dataset(folder, assets)
                 raise
+            self._clear_voice_tag_binding(folder, f"asset:{clip_id}")
             return {"voice_id": voice_id, "deleted": clip_id}
 
     def delete_voice_reference(self, voice_id: str, reference_index, audio) -> dict:
@@ -2271,7 +2369,135 @@ class AppState:
                 except OSError:
                     _write_voice_metadata(metadata_path, json.loads(original))
                     raise
+                self._clear_voice_tag_binding(folder, f"reference:{audio}")
             return self._voice(voice_id)
+
+    def _clear_voice_tag_binding(self, folder: Path, key: str):
+        """Drop one deleted clip's user tags; a failed write is filtered on read."""
+        try:
+            with self._voice_tags_lock:
+                assignments = _read_voice_tag_assignments(folder)
+                if key in assignments:
+                    assignments.pop(key)
+                    _write_voice_tag_assignments(folder, assignments)
+        except OSError:
+            pass
+
+    def voice_tag_state(self, voice_id: str) -> dict:
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        # Read voice/dataset under the existing assets lock, then release it before
+        # taking the tag lock. Nothing ever holds the tag lock and then asks for the
+        # assets lock, so deletion cleanup (assets -> tags) cannot deadlock.
+        with self._reference_assets_lock:
+            voice = self._voice(voice_id)
+            assets = {item["id"] for item in _read_voice_dataset(folder)}
+        references = {str(item.get("audio") or "") for item in voice["references"]}
+        with self._voice_tags_lock:
+            tags = _read_voice_tags(self.data_root)
+            bindings = _read_voice_tag_assignments(folder)
+        known = {tag["id"] for tag in tags}
+        result = {}
+        for key, ids in bindings.items():
+            kind, _, name = key.partition(":")
+            if kind == "asset" and name not in assets:
+                continue
+            if kind == "reference" and name not in references:
+                continue
+            filtered = [identifier for identifier in ids if identifier in known]
+            if filtered:
+                result[key] = filtered
+        return {"voice_id": voice_id, "tags": tags, "bindings": result}
+
+    def create_voice_tag(self, name, color) -> dict:
+        name = _voice_tag_name(name)
+        color = _voice_tag_color(color)
+        with self._voice_tags_lock:
+            tags = _read_voice_tags(self.data_root)
+            key = unicodedata.normalize("NFKC", name).casefold()
+            if any(unicodedata.normalize("NFKC", tag["name"]).casefold() == key for tag in tags):
+                raise ValueError(f"标签「{name}」已存在")
+            tag = {"id": uuid.uuid4().hex, "name": name, "color": color}
+            _write_voice_tags(self.data_root, [*tags, tag])
+            return {"tag": tag, "tags": [*tags, tag]}
+
+    def update_voice_tag(self, tag_id, payload) -> dict:
+        if not isinstance(tag_id, str) or not VOICE_TAG_ID.fullmatch(tag_id):
+            raise ValueError("Invalid tag id")
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid tag update")
+        with self._voice_tags_lock:
+            tags = _read_voice_tags(self.data_root)
+            index = next((position for position, tag in enumerate(tags)
+                          if tag["id"] == tag_id), None)
+            if index is None:
+                raise ValueError("标签不存在，请刷新后重试")
+            updated = dict(tags[index])
+            if "name" in payload:
+                name = _voice_tag_name(payload["name"])
+                key = unicodedata.normalize("NFKC", name).casefold()
+                if any(unicodedata.normalize("NFKC", tag["name"]).casefold() == key
+                       for tag in tags if tag["id"] != tag_id):
+                    raise ValueError(f"标签「{name}」已存在")
+                updated["name"] = name
+            if "color" in payload:
+                updated["color"] = _voice_tag_color(payload["color"])
+            if updated == tags[index]:
+                return {"tag": updated, "tags": tags}
+            tags[index] = updated
+            _write_voice_tags(self.data_root, tags)
+            return {"tag": updated, "tags": tags}
+
+    def delete_voice_tag(self, tag_id) -> dict:
+        if not isinstance(tag_id, str) or not VOICE_TAG_ID.fullmatch(tag_id):
+            raise ValueError("Invalid tag id")
+        with self._voice_tags_lock:
+            tags = _read_voice_tags(self.data_root)
+            remaining = [tag for tag in tags if tag["id"] != tag_id]
+            if len(remaining) == len(tags):
+                raise ValueError("标签不存在，请刷新后重试")
+            # Bindings are intentionally not rewritten across every voice file.
+            # Reads drop ids that are no longer in the dictionary.
+            _write_voice_tags(self.data_root, remaining)
+        return {"deleted": tag_id, "tags": remaining}
+
+    def set_voice_tag_binding(self, voice_id: str, key, tag_ids) -> dict:
+        if not isinstance(key, str) or not VOICE_TAG_KEY.fullmatch(key):
+            raise ValueError("Invalid tag target")
+        if not isinstance(tag_ids, list):
+            raise ValueError("标签列表格式不正确")
+        folder = _inside(self.voices_root / _voice_id(voice_id), self.voices_root)
+        if not (folder / "voice.json").is_file():
+            raise ValueError("Voice does not exist")
+        kind, _, name = key.partition(":")
+        # Resolve the stable identity on the server; clients never send a path.
+        with self._reference_assets_lock:
+            if kind == "asset":
+                if not any(item["id"] == name for item in _read_voice_dataset(folder)):
+                    raise ValueError("素材不存在，请刷新后重试")
+            else:
+                voice = self._voice(voice_id)
+                if not any(item.get("audio") == name for item in voice["references"]):
+                    raise ValueError("语音不存在，请刷新后重试")
+        clean = []
+        with self._voice_tags_lock:
+            tags = _read_voice_tags(self.data_root)
+            known = {tag["id"] for tag in tags}
+            for tag_id in tag_ids:
+                if not isinstance(tag_id, str) or not VOICE_TAG_ID.fullmatch(tag_id):
+                    raise ValueError("Invalid tag id")
+                if tag_id not in known:
+                    raise ValueError("标签不存在，请刷新后重试")
+                if tag_id not in clean:
+                    clean.append(tag_id)
+            assignments = _read_voice_tag_assignments(folder)
+            if clean:
+                assignments[key] = clean
+            else:
+                assignments.pop(key, None)
+            _write_voice_tag_assignments(folder, assignments)
+        return {"key": key, "tag_ids": clean}
 
     def list_voices(self, *, retained=False):
         result = []
@@ -3373,6 +3599,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/voices":
                 return self._json(200, {"voices": STATE.list_voices(),
                                         "retained": STATE.list_voices(retained=True)})
+            voice_tags = re.fullmatch(r"/api/voices/([^/]+)/tags", path)
+            if voice_tags:
+                return self._json(200, STATE.voice_tag_state(voice_tags.group(1)))
             if path.startswith("/api/voices/") and path.endswith("/clips"):
                 return self._json(200, STATE.voice_dataset(
                     path.removeprefix("/api/voices/").removesuffix("/clips")))
@@ -3493,6 +3722,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(201, STATE.save_uploaded_voice(self._payload()))
             if path == "/api/voices/from-references":
                 return self._json(201, STATE.save_reference_group(self._payload()))
+            if path == "/api/voice-tags":
+                if self.headers.get_content_type() != "application/json":
+                    return self._json(415, {"error": "Expected a JSON request"})
+                payload = self._payload()
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid tag request")
+                action = payload.get("action")
+                if action == "create":
+                    return self._json(201, STATE.create_voice_tag(
+                        payload.get("name"), payload.get("color")))
+                if action == "update":
+                    return self._json(200, STATE.update_voice_tag(payload.get("id"), payload))
+                if action == "delete":
+                    return self._json(200, STATE.delete_voice_tag(payload.get("id")))
+                raise ValueError("Unknown tag action")
+            voice_tags = re.fullmatch(r"/api/voices/([^/]+)/tags", path)
+            if voice_tags:
+                if self.headers.get_content_type() != "application/json":
+                    return self._json(415, {"error": "Expected a JSON request"})
+                payload = self._payload()
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid tag binding")
+                return self._json(200, STATE.set_voice_tag_binding(
+                    voice_tags.group(1), payload.get("key"), payload.get("tag_ids")))
             if path == "/api/voices/transcript":
                 return self._json(200, STATE.update_voice_transcript(self._payload()))
             asset_transcript = re.fullmatch(

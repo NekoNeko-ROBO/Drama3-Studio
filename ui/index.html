@@ -258,7 +258,7 @@
             <label class="voice-detail-select-all"><input id="voice-detail-select-all" type="checkbox" aria-label="全选当前角色的语音" disabled>全选</label>
             <button id="voice-detail-select-empty" class="secondary-btn" type="button" disabled>选择未标注语音</button>
             <button id="voice-detail-clear-selection" class="text-btn" type="button" disabled>清空选择</button>
-            <span id="voice-detail-selection-count" class="voice-detail-selection-count" role="status">已选 0 / 共 0 条</span>
+            <span id="voice-detail-selection-count" class="voice-detail-selection-count" role="status">已选 0 / 匹配 0 条</span>
             <button id="voice-detail-batch-identify" class="secondary-btn" type="button" disabled>批量识别</button>
             <button id="voice-detail-batch-adopt" class="secondary-btn" type="button" disabled>采用所选候选</button>
             <button id="voice-detail-batch-save" class="primary-btn" type="button" disabled>保存所选修改</button>
@@ -269,12 +269,27 @@
             <span id="voice-detail-action-status" class="voice-detail-batch-status" role="status"></span>
           </div>
 
+          <div class="voice-detail-filter">
+            <label class="voice-detail-search" for="voice-detail-search">
+              <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+              <input id="voice-detail-search" type="search" placeholder="搜索文件名或文字…" aria-label="搜索文件名或文字" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="voice-detail-filter-actions">
+              <button id="voice-detail-tag-filter" class="secondary-btn" type="button" aria-haspopup="dialog" aria-expanded="false">标签筛选</button>
+              <button id="voice-detail-filter-clear" class="text-btn" type="button" hidden>清除筛选</button>
+              <span id="voice-detail-match-count" class="voice-detail-match-count" role="status">匹配 0 / 共 0 条</span>
+              <button id="voice-detail-tag-manage" class="secondary-btn" type="button" aria-haspopup="dialog">自定义标签</button>
+            </div>
+          </div>
+          <p id="voice-detail-tag-status" class="voice-detail-tag-status" role="status" hidden></p>
+          <p id="voice-detail-no-match" class="voice-detail-no-match" hidden>没有匹配的语音</p>
+
           <table class="voice-detail-table">
             <thead>
               <tr>
                 <th scope="col">序号</th>
                 <th scope="col">音频</th>
-                <th scope="col">类型</th>
+                <th scope="col">标签</th>
                 <th scope="col">对应文字</th>
                 <th scope="col">操作</th>
               </tr>
@@ -282,6 +297,33 @@
             <tbody id="voice-detail-rows"></tbody>
             <tbody id="voice-detail-assets"></tbody>
           </table>
+
+          <div id="voice-detail-tag-popover" class="voice-detail-tag-popover" role="dialog" aria-label="设置标签" hidden>
+            <div class="voice-detail-tag-popover-head">
+              <strong>设置标签</strong>
+              <span id="voice-detail-tag-popover-name" class="voice-detail-tag-popover-name"></span>
+              <button id="voice-detail-tag-popover-close" class="icon-btn" type="button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+            </div>
+            <p class="voice-detail-tag-popover-help">点击标签立即保存，可多选。</p>
+            <div id="voice-detail-tag-popover-list" class="voice-detail-tag-popover-list"></div>
+            <p id="voice-detail-tag-popover-error" class="voice-detail-tag-popover-error" role="alert" hidden></p>
+            <div class="voice-detail-tag-popover-footer">
+              <button id="voice-detail-tag-popover-clear" class="text-btn" type="button">清除全部标签</button>
+              <button id="voice-detail-tag-popover-manage" class="text-btn" type="button">自定义标签…</button>
+            </div>
+          </div>
+
+          <div id="voice-detail-tag-filter-popover" class="voice-detail-tag-popover voice-detail-tag-filter-popover" role="dialog" aria-label="标签筛选" hidden>
+            <div class="voice-detail-tag-popover-head">
+              <strong>标签筛选</strong>
+              <button id="voice-detail-tag-filter-close" class="icon-btn" type="button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+            </div>
+            <p class="voice-detail-tag-popover-help">多选时按“任一匹配”，并可与文字搜索同时生效。</p>
+            <div id="voice-detail-tag-filter-list" class="voice-detail-tag-popover-list"></div>
+            <div class="voice-detail-tag-popover-footer">
+              <button id="voice-detail-tag-filter-reset" class="text-btn" type="button">清除标签筛选</button>
+            </div>
+          </div>
         </div>
       </section>
       <section class="view" id="view-takes">
@@ -490,6 +532,44 @@
     <div class="studio-dialog-footer">
       <button id="voice-detail-batch-delete-confirm" class="secondary-btn voice-asset-delete-danger" type="button">确认删除</button>
       <button id="voice-detail-batch-delete-cancel" class="primary-btn" type="button" autofocus>取消</button>
+    </div>
+  </dialog>
+  <dialog id="voice-tag-dialog" class="studio-dialog voice-tag-dialog" aria-labelledby="voice-tag-title">
+    <div class="studio-dialog-heading">
+      <h2 id="voice-tag-title">自定义标签</h2>
+      <button id="voice-tag-dialog-close" type="button" class="icon-btn" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="studio-dialog-body">
+      <p class="field-help">标签在整个音色库共用；改名或换色会在所有角色生效。</p>
+      <form id="voice-tag-form" class="voice-tag-form">
+        <label class="voice-tag-field" for="voice-tag-name"><span>标签名称</span><input id="voice-tag-name" class="input" maxlength="24" autocomplete="off" placeholder="例如：旁白、少年、低沉"></label>
+        <label class="voice-tag-field voice-tag-color-field" for="voice-tag-color"><span>颜色</span><input id="voice-tag-color" class="voice-tag-color" type="color" value="#c64a2e"></label>
+        <div class="voice-tag-preview-line"><span class="field-label">预览</span><span id="voice-tag-preview" class="voice-detail-tag-chip">标签预览</span></div>
+        <div class="voice-tag-form-actions">
+          <button id="voice-tag-submit" class="primary-btn" type="submit">添加标签</button>
+          <button id="voice-tag-cancel-edit" class="text-btn" type="button" hidden>取消编辑</button>
+        </div>
+      </form>
+      <p id="voice-tag-error" class="studio-error voice-tag-error" role="alert" hidden></p>
+      <ul id="voice-tag-list" class="voice-tag-list"></ul>
+      <p id="voice-tag-empty" class="field-help" hidden>还没有标签，使用上方表单添加。</p>
+      <div id="voice-tag-delete-confirm" class="voice-tag-confirm" hidden>
+        <p>删除标签「<span id="voice-tag-delete-name"></span>」？只会删除标签本身，不会删除任何音频。</p>
+        <div class="voice-tag-confirm-actions">
+          <button id="voice-tag-delete-confirm-btn" class="secondary-btn voice-asset-delete-danger" type="button">确认删除</button>
+          <button id="voice-tag-delete-cancel" class="primary-btn" type="button">取消</button>
+        </div>
+      </div>
+      <div id="voice-tag-discard" class="voice-tag-confirm" hidden>
+        <p>有未保存的标签修改，确定关闭吗？</p>
+        <div class="voice-tag-confirm-actions">
+          <button id="voice-tag-discard-confirm" class="secondary-btn voice-asset-delete-danger" type="button">放弃修改并关闭</button>
+          <button id="voice-tag-discard-cancel" class="primary-btn" type="button">继续编辑</button>
+        </div>
+      </div>
+    </div>
+    <div class="studio-dialog-footer">
+      <button id="voice-tag-dialog-done" class="secondary-btn" type="button">完成</button>
     </div>
   </dialog>
   <script src="/assets/i18n.js"></script>
