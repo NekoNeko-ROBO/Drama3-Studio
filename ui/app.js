@@ -1321,7 +1321,7 @@ function closeVoiceDetail() {
   $('voice-detail').hidden = true;
   $('voice-list').hidden = false;
   document.querySelector('#view-voices .voice-library-toolbar').hidden = false;
-  filterVoices();
+  renderVoices();
 }
 
 function openVoiceDetail(voiceId) {
@@ -1348,7 +1348,7 @@ function openVoiceDetail(voiceId) {
     const audioCell = document.createElement('td');
     const audio = document.createElement('audio');
     audio.controls = true;
-    audio.preload = 'none';
+    audio.preload = 'metadata';
     audio.src = clip.audio_url;
     audio.addEventListener('play', () => {
       stopVoicePreview();
@@ -1359,7 +1359,56 @@ function openVoiceDetail(voiceId) {
     audioCell.append(audio);
 
     const text = document.createElement('td');
-    text.textContent = clip.transcript || '';
+    const editor = document.createElement('textarea');
+    editor.value = clip.transcript || '';
+    editor.rows = 2;
+    editor.setAttribute('aria-label', `第 ${index + 1} 条语音的对应文字`);
+
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'secondary-btn';
+    save.textContent = '保存文字';
+
+    const status = document.createElement('span');
+    status.setAttribute('role', 'status');
+
+    editor.addEventListener('input', () => {
+      status.textContent = '尚未保存';
+    });
+
+    save.onclick = async () => {
+      if (!editor.value.trim()) {
+        status.textContent = '文字不能为空';
+        return;
+      }
+
+      save.disabled = true;
+      editor.disabled = true;
+      status.textContent = '保存中…';
+
+      try {
+        const updated = await api('/api/voices/transcript', {
+          method: 'POST',
+          body: JSON.stringify({
+            voice_id: voiceId,
+            reference_index: index,
+            text: editor.value,
+          }),
+        });
+
+        const position = state.voices.findIndex(item => item.id === voiceId);
+        if (position !== -1) state.voices[position] = updated;
+        editor.value = updated.references[index].transcript;
+        status.textContent = '已保存';
+      } catch (error) {
+        status.textContent = `保存失败：${error.message}`;
+      } finally {
+        save.disabled = false;
+        editor.disabled = false;
+      }
+    };
+
+    text.append(editor, save, status);
 
     row.append(number, audioCell, text);
     rows.append(row);

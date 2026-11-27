@@ -2006,6 +2006,49 @@ class AppState:
         return {**metadata, "id": voice_id, "audio_path": references[0]["audio_path"],
                 "audio_url": references[0]["audio_url"], "references": references}
 
+    def update_voice_transcript(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid transcript update")
+
+        voice_id = payload.get("voice_id")
+        index = payload.get("reference_index")
+        text = payload.get("text")
+
+        if not isinstance(voice_id, str):
+            raise ValueError("Invalid voice id")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("Invalid reference index")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Reference transcript must not be empty")
+
+        text = text.strip()
+        VoiceReference("", text, 0).transcript()
+
+        with self._reference_assets_lock:
+            voice = self._voice(voice_id)
+            if not 0 <= index < len(voice["references"]):
+                raise ValueError("Invalid reference index")
+
+            path = self.voices_root / voice_id / "voice.json"
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+
+            if metadata.get("references"):
+                metadata["references"][index]["transcript"] = text
+            if index == 0:
+                metadata["transcript"] = text
+
+            temporary = path.with_name(f"voice-{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+            return self._voice(voice_id)
+
     def list_voices(self, *, retained=False):
         result = []
         removed = self.studio.removed("voices")
@@ -3219,6 +3262,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(201, STATE.save_uploaded_voice(self._payload()))
             if path == "/api/voices/from-references":
                 return self._json(201, STATE.save_reference_group(self._payload()))
+            if path == "/api/voices/transcript":
+                return self._json(200, STATE.update_voice_transcript(self._payload()))
             if path == "/api/studio/prepare-restore":
                 return self._json(200, STATE.prepare_version_restore(self._payload()))
             if path == "/api/studio/context-status":
